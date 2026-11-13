@@ -579,7 +579,26 @@ in one ciphertext, on the widest layer (TinyStories-1M layer 2):
 - Encrypted outputs match the emulation to 2×10⁻⁵ (fitted), which validates the emulation used
   for the full-model tables.
 
-_GPT-2 layer 4, encrypted: pending; the run is in progress._
+**GPT-2 layer 4** is GPT-2's widest layer and the one where the fitted shift helps least.
+Encrypted, same setup:
+
+| Strategy | k | Levels used | Ring | Worst-row precision | Server time |
+|---|---|---|---|---|---|
+| **Fitted shift, G-rule** | 3 | 43 | 2¹⁷ | **10.8 bits** | 50.4 s |
+| Constant, G-rule | 4 | 47 | 2¹⁷ | 9.9 bits | 48.9 s |
+| Current practice | 6 | 62 | 2¹⁷ | 5.5 bits | 74.6 s |
+
+- Here all three circuits need the same ring, so the gain is smaller: **1.5× faster, with twice
+  the precision bits**.
+- Most of it comes from the G-rule. The fitted shift saves one more round but pays for its own
+  shift operations, so it is no faster than the constant G-rule here.
+- Peak RAM is not reported per strategy for this run: the process-wide maximum was 8.1 GB.
+
+**Honest summary**
+- The benefit is largest where row maxima vary a lot: 5× on TinyStories layer 2, 1.5× on
+  GPT-2's worst layer.
+- In the emulation, most GPT-2 layers fall to k = 0 (§11.6 table).
+- The next steps are a per-layer encrypted sweep and bootstrapping-aware timing.
 
 ---
 
