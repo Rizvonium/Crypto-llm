@@ -181,7 +181,8 @@ class FheSoftmax:
         self.keys = cc.KeyGen()
         cc.EvalMultKeyGen(self.keys.secretKey)
         steps = [self.R * 2 ** i for i in range(int(math.log2(plan.n)))]
-        cc.EvalRotateKeyGen(self.keys.secretKey, steps + [-t for t in steps])
+        # negative steps are only needed to broadcast the sink score (fitted shift)
+        cc.EvalRotateKeyGen(self.keys.secretKey, steps + ([-t for t in steps] if plan.shift_kind == "fitted" else []))
         self.steps = steps
 
     # packing helpers (client side)

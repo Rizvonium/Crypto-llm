@@ -16,9 +16,11 @@ and evaluated (1) by exact emulation of the polynomial pipeline on all held-out 
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import math
 import pathlib
+import resource
 
 import numpy as np
 import torch
@@ -85,6 +87,7 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--no-fhe", action="store_true")
     ap.add_argument("--json", default=None)
+    ap.add_argument("--scale-bits", type=int, default=35, help="CKKS scaling-modulus bits for the encrypted runs")
     args = ap.parse_args()
 
     texts = load_stories("validation", 500)
@@ -118,21 +121,24 @@ def main() -> None:
             rows = R[widest]
             test = rows[cut:cut + 8]
             ref = exact_softmax(test)
-            print(f"\nEncrypted check (OpenFHE CKKS, 128-bit security), layer {widest}, 8 held-out rows packed in one ciphertext:\n")
-            print("| strategy | k | planned depth | levels used | ring dimension | precision bits (min) | max abs diff vs emulation | server time |")
-            print("|---|---|---|---|---|---|---|---|")
+            print(f"\nEncrypted check (OpenFHE CKKS, 128-bit security, {args.scale_bits}-bit scale), layer {widest}, "
+                  f"8 held-out rows packed in one ciphertext:\n")
+            print("| strategy | k | planned depth | levels used | ring dimension | precision bits (min) | max abs diff vs emulation | server time | peak RAM (process) |")
+            print("|---|---|---|---|---|---|---|---|---|")
             fres = {}
-            for tag in STRATEGIES:
+            for tag in ("fitted", "g-rule", "current"):
                 plan = per_layer[widest][tag]["plan"]
-                fhe = FheSoftmax(plan, rows_per_ct=8)
+                fhe = FheSoftmax(plan, rows_per_ct=8, scale_bits=args.scale_bits)
                 y, lvl, secs = fhe.softmax(test)
                 emu = emulate(plan, test)[0]
                 bits = precision_bits(y, ref).min()
                 print(f"| {tag} | {plan.k} | {plan.depth()} | {lvl} | 2^{int(math.log2(fhe.cc.GetRingDimension()))} | "
-                      f"{bits:.1f} | {np.abs(y - emu).max():.1e} | {secs:.1f} s |", flush=True)
+                      f"{bits:.1f} | {np.abs(y - emu).max():.1e} | {secs:.1f} s | "
+                      f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6:.1f} GB |", flush=True)
                 fres[tag] = {"k": plan.k, "depth": plan.depth(), "levels": lvl, "ring": fhe.cc.GetRingDimension(),
                              "bits_min": float(bits), "seconds": secs}
                 del fhe
+                gc.collect()
             results[name]["fhe"] = {"layer": widest, **fres}
     if args.json:
         pathlib.Path(args.json).write_text(json.dumps(results, indent=1, default=float))
