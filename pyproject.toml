@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "cryptollm"
 version = "0.1.0"
@@ -12,11 +16,15 @@ dependencies = [
 [project.optional-dependencies]
 fhe = ["tenseal>=0.3.15"]
 bootstrap = ["openfhe>=1.2"]   # wheels currently ship a CPython 3.12 binary
-ner = ["presidio-analyzer>=2.2"]
+ner = ["presidio-analyzer>=2.2"]            # + a spaCy model, e.g. en_core_web_lg
+gliner = ["gliner>=0.2", "transformers>=4.51,<5", "sentencepiece", "protobuf"]  # CPU torch is enough
 dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
 include = ["cryptollm*"]
+
+[tool.setuptools.package-data]
+cryptollm = ["fhe/corpus.txt", "fhe/char_lm_weights.npz", "gateway/eval/*.jsonl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

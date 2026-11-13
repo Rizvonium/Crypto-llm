@@ -4,6 +4,7 @@
     python -m cryptollm.gateway --provider ollama --model llama3.1 "..."
     python -m cryptollm.gateway --provider anthropic --model <model-id> --terms "Acme,Project Falcon" "..."
     python -m cryptollm.gateway --vault me.vault "..."      # consistent pseudonyms across runs
+    python -m cryptollm.gateway --gliner "..."               # + neural name/address detection
 
 Default provider is ``dry-run``: nothing leaves the machine; you see exactly what would.
 """
@@ -42,13 +43,20 @@ def main(argv=None) -> None:
     ap.add_argument("--model")
     ap.add_argument("--base-url", help="any OpenAI-compatible endpoint (local server, TEE service, ...)")
     ap.add_argument("--terms", default="", help="comma-separated names/terms to always hide")
-    ap.add_argument("--ner", action="store_true", help="also use Presidio NER (optional dependency)")
+    ap.add_argument("--gliner", action="store_true",
+                    help="add GLiNER PII NER (pip install gliner; best measured recall for names)")
+    ap.add_argument("--ner", action="store_true", help="add Presidio + spaCy NER (optional dependency)")
+    ap.add_argument("--quasi", action="store_true",
+                    help="with --gliner, also hide organisations and places (more privacy, less utility)")
     ap.add_argument("--vault", help="encrypted vault file for consistent pseudonyms across runs")
     args = ap.parse_args(argv)
 
     detectors = list(DEFAULT_DETECTORS)
     if args.terms:
         detectors.insert(0, TermsDetector([t.strip() for t in args.terms.split(",")], default_label="TERM"))
+    if args.gliner:
+        from .detectors import GlinerDetector
+        detectors.append(GlinerDetector(include_quasi=args.quasi))
     if args.ner:
         from .detectors import PresidioDetector
         detectors.append(PresidioDetector())

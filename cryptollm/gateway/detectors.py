@@ -95,9 +95,58 @@ PHONE = RegexDetector(
 )
 SECRET = RegexDetector(
     "SECRET",
-    r"\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}"
-    r"|xox[abpr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35})\b",
+    r"(?:\b(?:sk-(?:ant-|proj-)?[A-Za-z0-9_-]{20,}|(?:sk|rk|pk)_(?:live|test)_[0-9A-Za-z]{16,}"
+    r"|AKIA[0-9A-Z]{16}|gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,}"
+    r"|xox[abpr]-[A-Za-z0-9-]{10,}|AIza[0-9A-Za-z_-]{35}|hf_[A-Za-z0-9]{30,}"
+    r"|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,})\b"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]+?-----END [A-Z ]*PRIVATE KEY-----)",
 )
+
+
+def _entropy(s: str) -> float:
+    from collections import Counter
+    from math import log2
+
+    n = len(s)
+    return -sum(c / n * log2(c / n) for c in Counter(s).values())
+
+
+# Random-looking tokens (API secrets, passwords, session cookies): long, mixed upper/lower/digits,
+# high Shannon entropy. Lowercase-only hashes and plain paths do not qualify.
+HIGH_ENTROPY = RegexDetector(
+    "SECRET",
+    r"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{24,}(?![A-Za-z0-9+/=_-])",
+    lambda t: (any(c.islower() for c in t) and any(c.isupper() for c in t) and any(c.isdigit() for c in t)
+               and _entropy(t) >= 4.0),
+)
+
+
+class ContextualIdDetector:
+    """Identifier-looking tokens right after a cue word ("passport no. A07345921",
+    "MRN 00482913", "my PAN ABCPK1234L", "booking reference HX-77821-LP"). Cue words make
+    this precise enough to catch formats no checksum regex knows about."""
+
+    CUES = (r"passport|pan|aadhaa?r|ssn|social security|national id|id(?:entity)?(?: card)?|licen[cs]e|"
+            r"account|acct|a/c|iban|routing|sort code|policy|member(?:ship)?|customer|client|patient|mrn|"
+            r"employee|staff|student|roll|registration|reg|enrol(?:l)?ment|booking|reservation|pnr|"
+            r"confirmation|reference|ref|order|invoice|ticket|case|claim|tracking|serial|vin|tax|tin|"
+            r"gstin|ein|uan|voter|nhs|medicare|insurance|pin")
+    RX = re.compile(
+        rf"\b(?:{CUES})\b(?:\s*(?:no\.?|number|num|#|id|code|is|was|:|-))*\s*[:#]?\s*"
+        r"(?P<id>(?=[A-Za-z0-9-]*\d)[A-Za-z0-9](?:[A-Za-z0-9-]{3,}[A-Za-z0-9])"
+        r"|\d[\d -]{3,}\d)",
+        re.I,
+    )
+
+    def detect(self, text: str) -> list[Span]:
+        out = []
+        for m in self.RX.finditer(text):
+            tok = m.group("id")
+            if sum(c.isdigit() for c in tok) >= 3 and not tok.isalpha():
+                out.append(Span(m.start("id"), m.end("id"), "ID", tok))
+        return out
+
+
 HONORIFIC_NAME = RegexDetector(
     "PERSON",
     r"\b(?:Mr|Mrs|Ms|Mx|Dr|Prof|Sir|Dame)\.?\s+((?:[A-Z][a-z'’-]+)(?:\s+[A-Z][a-z'’-]+){0,2})",
@@ -118,22 +167,75 @@ class TermsDetector:
 
 
 class PresidioDetector:
-    """Optional NER via Microsoft Presidio (pip install presidio-analyzer + a spaCy model)."""
+    """Optional NER via Microsoft Presidio + spaCy (pip install presidio-analyzer and a spaCy
+    model, e.g. en_core_web_lg). Only the NER entities are used; structured IDs are already
+    covered by the checksum-validated detectors above."""
 
     LABELS = {"PERSON": "PERSON", "LOCATION": "LOCATION", "NRP": "GROUP", "ORGANIZATION": "ORG"}
 
-    def __init__(self, threshold: float = 0.6):
+    def __init__(self, threshold: float = 0.6, entities: Iterable[str] | None = None):
         from presidio_analyzer import AnalyzerEngine  # imported lazily
 
         self.engine, self.threshold = AnalyzerEngine(), threshold
+        supported = set(self.engine.get_supported_entities("en"))
+        self.entities = [e for e in (entities or self.LABELS) if e in supported]
 
     def detect(self, text: str) -> list[Span]:
-        res = self.engine.analyze(text=text, language="en", entities=list(self.LABELS))
-        return [Span(r.start, r.end, self.LABELS[r.entity_type], text[r.start:r.end])
+        res = self.engine.analyze(text=text, language="en", entities=self.entities)
+        return [Span(r.start, r.end, self.LABELS.get(r.entity_type, r.entity_type), text[r.start:r.end])
                 for r in res if r.score >= self.threshold]
 
 
-DEFAULT_DETECTORS: list[Detector] = [SECRET, EMAIL, URL, IBAN, CREDIT_CARD, SSN, IPV4, IPV6, PHONE, HONORIFIC_NAME]
+def _chunks(text: str, max_chars: int):
+    """Split on sentence/line boundaries into pieces of at most ~max_chars, with offsets."""
+    start = 0
+    while start < len(text):
+        end = min(len(text), start + max_chars)
+        if end < len(text):
+            cut = max(text.rfind(". ", start, end), text.rfind("\n", start, end))
+            if cut > start:
+                end = cut + 1
+        yield start, text[start:end]
+        start = end
+
+
+class GlinerDetector:
+    """Optional zero-shot NER with a GLiNER PII model (pip install gliner; CPU is fine,
+    ~0.2 s per short prompt). Catches lowercase and non-Western names that regexes and
+    small spaCy models miss. Label names are natural-language prompts to the model."""
+
+    DEFAULT_LABELS = {
+        "person": "PERSON",
+        "street address": "ADDRESS",
+        "phone number": "PHONE",
+        "passport number": "ID",
+        "national id number": "ID",
+        "bank account number": "ID",
+        "date of birth": "DOB",
+        "username": "USERNAME",
+    }
+    QUASI_LABELS = {"organization": "ORG", "city": "LOCATION", "location": "LOCATION"}
+
+    def __init__(self, model: str = "urchade/gliner_multi_pii-v1", labels: dict[str, str] | None = None,
+                 threshold: float = 0.5, include_quasi: bool = False, max_chars: int = 1000):
+        from gliner import GLiNER  # imported lazily
+
+        self.model = GLiNER.from_pretrained(model)
+        self.labels = dict(labels or self.DEFAULT_LABELS)
+        if include_quasi:
+            self.labels.update(self.QUASI_LABELS)
+        self.threshold, self.max_chars = threshold, max_chars
+
+    def detect(self, text: str) -> list[Span]:
+        spans = []
+        for off, chunk in _chunks(text, self.max_chars):
+            for e in self.model.predict_entities(chunk, list(self.labels), threshold=self.threshold):
+                spans.append(Span(off + e["start"], off + e["end"], self.labels[e["label"]], e["text"]))
+        return spans
+
+
+DEFAULT_DETECTORS: list[Detector] = [SECRET, EMAIL, URL, IBAN, CREDIT_CARD, SSN, IPV4, IPV6, PHONE,
+                                     ContextualIdDetector(), HIGH_ENTROPY, HONORIFIC_NAME]
 
 
 def detect_all(text: str, detectors: Iterable[Detector]) -> list[Span]:

@@ -1,217 +1,522 @@
-# Can we send an encrypted prompt to an LLM and get back an answer only we can read?
+# Can we encrypt an LLM prompt so that only we can read the answer?
 
-**Short answer: yes, it is mathematically possible, and you can run it on a tiny model
-today. Nobody can do it yet for a GPT/Claude/Gemini-class model at usable speed.** Five
-other things are practical now. They protect different things and rest on different
-trust assumptions, and you can combine them.
+### Final report, 13 November 2026
 
-> **About the sources.** The live web-research agents for this report hit a usage limit
-> before they returned, so §§1–2 and §§4–6 come from the author's knowledge up to mid-2026,
-> not from a fresh literature check. Product status and paper numbers marked ⚠ change fast
-> or are quoted from memory as orders of magnitude; re-check them before citing. Everything
-> in §3 was **measured in this repository**.
+Five research agents covered fully homomorphic encryption, multi-party computation and
+obfuscation, trusted execution environments, prompt sanitization, and the practical options
+(local models, provider terms, law). They reported only what they checked against sources
+during this research. The measurements in §9 were run in this repository.
 
 ---
 
-## 1. Why you can't just encrypt the prompt and send it to ChatGPT
+## 0. The answer in brief
 
-An LLM is a function `f` that the provider evaluates on *their* machine. If you send
-`Enc(prompt)` to an ordinary model you get `f(Enc(prompt))`, which is garbage. The other
-tempting trick is a cipher the model can still understand: a substitution code, "reply in
-base64", or permuted tokens. That fails by construction. **Whatever the model can decode,
-the operator running that same model can decode.** They have the model, the prompt and
-every activation.
+**Yes, it can be done. It works today for open-weight models, and you pay for it in
+speed, money or trust. There is no cryptographic way to do it with ChatGPT, Claude or
+Gemini unless the provider builds it.**
 
-So privacy against the party running the model has only five possible sources:
+| You want… | Best available today | What you trust | Cost |
+|---|---|---|---|
+| Nobody but you ever sees the prompt | **Run an open-weight model locally.** On a 32 GB laptop: Gemma 4 31B, Qwen3.6-27B, gpt-oss-20b. On an 80 GB GPU: gpt-oss-120b (§7) | your own machine | a quality gap: on the AA Intelligence Index v5, open models score 32–46 vs 58 for the best closed model |
+| A server computes the answer and *mathematically* never sees it | **Fully homomorphic encryption (FHE).** Llama-3-8B runs end to end at **18 s per token on 8 GPUs**, about $0.08/token, so a 500-token answer takes ≈ 2.5 h (§2) | maths only (lattice hardness) | ≈ 10³–10⁴× plaintext on GPUs; research code only |
+| Same, by splitting trust | **Multi-party computation (MPC).** Llama2-7B: 23 s per forward pass on 2 GPUs plus 255 GB of dealer keys, or 200 s/token on 3 CPU servers (§3) | the servers don't collude | 10²–10⁴×, gigabytes per token; no product |
+| A big open model at normal speed, operator locked out | **Confidential computing (TEE)** with attestation **checked by your own client**: Tinfoil, Privatemode, Cohere Model Vault Encrypted (beta), OpenPCC (§4) | Intel/AMD/NVIDIA, and that nobody with physical access has tampered with the machine | ≈ 1–8% overhead |
+| GPT/Claude/Gemini specifically | **Hide the identifiers** with a local gateway (§5, built here), plus a zero-retention account (§8) | the provider still sees the remaining text and its context | small quality loss on most tasks (≈ −0.6/10 on writing, < 5 points on benchmarks); fails when the hidden value *is* the question |
 
-| # | Approach | Who you trust | Works with frontier closed models? | Speed today |
-|---|---|---|---|---|
-| A | **Don't send it**: run an open-weight model locally | nobody | no (open-weight only) | native |
-| B | **Hide the sensitive parts**: pseudonymize, restore locally | the provider sees the rest of the text | **yes** | native |
-| C | **Hardware enclave (TEE / confidential computing)** | chip vendors (NVIDIA/AMD/Intel) and the attestation chain | only the vendor's own products, e.g. Apple PCC and Google Private AI Compute ⚠; no general frontier API | ≈ native |
-| D | **Split trust (MPC)** | at least one of 2–3 servers stays honest and they don't collude | no | minutes/token ⚠ |
-| E | **Compute on ciphertexts (FHE)** | only mathematics (lattice hardness) | no (the provider would have to run it) | hours/token on CPU for an 8B model (§3) |
+**Two facts behind every row:**
 
-Two things this table doesn't cover:
-
-- **Anonymity** (who you are): Oblivious HTTP (RFC 9458), Privacy Pass, Duck.ai-style
-  proxies. These hide your identity from the provider but not your text, and text often
-  identifies its author.
-- **Contracts** (zero-data-retention terms, "we don't train on API data"): useful, but
-  revocable. The 2025 *NYT v. OpenAI* preservation order forced retention of chats that
-  users had deleted ⚠. Policy is not cryptography.
+1. **Whatever the model can read, its operator can read.** Encrypting the prompt with an
+   ordinary cipher, or in a code the model "understands", gives no privacy. The operator
+   runs the same model on the same input. So privacy against the operator needs one of
+   four things:
+   - computing on ciphertext (FHE);
+   - splitting the computation (MPC);
+   - hardware that locks the operator out (TEE);
+   - not sending the secret at all (local model, or sanitization).
+2. **Promises are not encryption.** In 2025 a US court ordered OpenAI to keep chats that
+   users had deleted. Warrants for chatbot logs are now routine. The newest frontier
+   models increasingly *require* 30-day retention (§8).
 
 ---
 
-## 2. The options in detail
+## 1. Why the obvious ideas fail
 
-### A. Local / self-hosted open-weight models: the strongest practical answer
-If the prompt never leaves your machine, there is nothing to protect. Open-weight models
-(e.g. the gpt-oss, Qwen3, Llama, Gemma, DeepSeek and Mistral families ⚠) run via Ollama,
-llama.cpp, LM Studio, vLLM or MLX. At 4-bit quantization a ~20–30B model fits in 16–32 GB
-of RAM; a ~120B MoE model needs ~64–80 GB. They are still behind the best closed models on
-the hardest tasks, but good enough for drafting, summarizing, coding help and analysis of
-personal documents. On a rented GPU server the *LLM company* sees nothing, but the *cloud
-host* could. Combine with C (a confidential VM) to address that.
+| Idea | Status | Evidence |
+|---|---|---|
+| "Encrypt" the prompt with a secret cipher that the model is told how to decode | **No privacy** | The cipher has to travel inside the prompt, so the operator decodes it too. CipherChat (ICLR 2024) shows GPT-4 can work in ciphers *when the prompt explains them* |
+| Keyed token / vocabulary substitution with a matching embedding layer (SentinelLMs, AlienLM, STIP) | **Broken** | A ciphertext-only attack recovers 70–95% of tokens (PMA, EMNLP 2026). Under a secret rotation, row-norm matching recovers ~100% (ConjFormer 2026). **Our attack: 100% of a 3,000-token mapping**, including rotation and 15% noise (§9.3) |
+| Permute the hidden states (PermLLM, STIP, Centaur) | **Broken** | 97.6–99.9% of prompts decoded perfectly on Llama-3.1-8B and Gemma-2 ("Hidden No More", ICML 2025) |
+| Send embeddings or middle-layer activations instead of text | **Broken** | Vec2Text recovers 92% of 32-token inputs exactly. 86.88 token-F1 from a Llama-3 middle layer on a 4,112-token prompt (USENIX Security 2025) |
+| Add decoy queries (k-anonymity) | **Weak** | The real sub-prompts still go out in plaintext |
+| 2026 heuristic obfuscators (AloePri at ByteDance on a 671B model; GELO; ConjFormer) | **Unproven** | No security proofs. AloePri's own ablation shows >30% token recovery at a weaker noise setting |
 
-### B. Prompt sanitization / pseudonymization: the only option that works with GPT/Claude/Gemini today
-Replace names, emails, IDs, account numbers and keys with typed placeholders, send the
-sanitized prompt, and put the real values back into the answer on your machine. **This repo
-ships a working gateway** (`cryptollm/gateway`):
+---
+
+## 2. Fully homomorphic encryption: the literal answer, now real but slow
+
+The client encrypts and holds the only key. The server runs the model on ciphertexts using
+plaintext weights. Only the client can decrypt the output.
+
+**2026 state of the art (verified):**
+
+| System | Model and workload | Speed and hardware |
+|---|---|---|
+| Park, Cheon, Stehlé et al., arXiv 2601.18511 (v2, Jun 2026) | **Llama-3-8B, full generation**, 128 encrypted tokens; perplexity 6.13, the same as FP16 | 20 s prefill + **18 s per token**, 8× RTX PRO 6000 (confirmed in the v2 abstract). With a 4k-token prompt (last 128 tokens encrypted): 64 s + 22 s/token. v1 (Jan 2026): Llama-2-7B, 33 s/token on 8× RTX 4090 |
+| Fan et al. ("Themis"/"Odin"), arXiv 2609.12378 (Sep 2026) | Llama-3-8B, 128-token input, all 32 layers, **described as the first open-source end-to-end implementation** | 366 s server time on **1× H100**, 4.5× faster than THOR's method under the same conditions; per-token decode not reported |
+| Cachemir, arXiv 2602.11470 | Llama-3-8B decode; perplexity unchanged | **1.61 min per token** on 1× A100-80GB. The encrypted KV cache is ≈ 17 GB per 1k tokens |
+| Cerium (SOSP 2026) | Llama-3-8B prefill, 128 tokens | 43 s to first token on 8× B200; 241 s on 1× B200. Decode not reported |
+| BERT-base, 128 tokens: THOR (CCS 2025) → MOAI (ICLR 2026) → Tricycle → Terrazzo (Sep 2026) | encoder classification | 10.4 min → 2.4 min → 100 s → **7 s per input** (batched, RTX 5090) |
+| Encryption-friendly LLM (ICLR 2025) | encrypted **LoRA fine-tuning** and inference (2-layer model) | 6.9× faster fine-tuning than the baseline |
+| Zama Concrete-ML GPT-2 | 1 attention head, TFHE | 166 s on a 196-core CPU (2023) |
+
+**What it costs:** 18 s/token on 8 GPUs is ≈ 144 GPU-seconds, about **$0.08 per token** at
+$2/GPU-hour. A 500-token answer takes about 2.5 h and $40. Plaintext costs fractions of a
+cent.
+
+**Why it is slow:**
+- bootstrapping (62% of NEXUS's CPU time);
+- ciphertext × ciphertext matmuls in attention;
+- polynomial approximations of softmax, GELU and RMSNorm, made harder by outlier
+  activations;
+- weights encoded for FHE, 52–58 GiB for Llama-3-8B (982 GB raw in Cerium);
+- a multi-GB encrypted KV cache;
+- per-client evaluation keys of 7 GB (measured here) to 50 GB.
+
+Batched "amortized" figures only hold when all inputs belong to one client key.
+
+**What still leaks:**
+- With a client in the loop (decrypt, sample, re-encrypt each token), the server sees the
+  output length and timing.
+- Non-interactive argmax forces greedy decoding and a fixed token budget, and that budget
+  is visible.
+- There is no integrity guarantee that the server ran the right model.
+
+**Hardware and timeline:**
+- Intel's Heracles research chip (ISSCC, Feb 2026) is **1,074–5,547× faster** than a Xeon
+  on FHE primitives, but Intel has no product plans.
+- No FHE ASIC can be bought in 2026. Niobium has funding and tape-outs; Optalysys sells an
+  FPGA node for TFHE; Fabric, Cornami and Chain Reaction have shown no verified LLM
+  results.
+- GPUs are the practical accelerator: one bootstrap takes 7.5–34 ms on datacenter GPUs,
+  against **11.9 s on our 4-core CPU**.
+- Zama predicted "encrypted AI within 5 years" in 2023, i.e. about 2028.
+- **Our estimate:** ~1 s/token on GPU clusters within 2–3 years. Affordable interactive
+  chat needs ASICs, so roughly 2029–2032.
+
+**Production HE today** is shallow lookups with no bootstrapping:
+- Apple's Live Caller ID and Enhanced Visual Search;
+- Microsoft Edge Password Monitor;
+- Google's open-source HEIR compiler (Aug 2026).
+
+**Bottom line:** FHE is the only option whose guarantee rests on maths alone, and an 8B
+model now runs end to end. It costs about 10⁴× plaintext, and only the operator can deploy
+it on their own model. It is a strong research direction, but not yet a practical tool for
+chatting.
+
+---
+
+## 3. Multi-party computation: works up to 13B, no product
+
+| System | Model and result | Traffic | Setting |
+|---|---|---|---|
+| SIGMA (PETS 2024) | Llama2-7B **23.1 s**, 13B **37.6 s** per 128-token forward pass | 12–19 GB online, plus **255–419 GB of dealer keys** | 2 A6000 GPUs + trusted dealer, 9.4 Gbps LAN; 5.7–8.3 min over WAN |
+| PUMA | LLaMA-7B **200 s per token** | 1.8 GB/token | 3 servers (honest majority), 0.1 ms RTT |
+| BumbleBee (NDSS 2025) | LLaMA-7B **8 min per token** | 6.3 GB/token | 2 parties (user + provider), 1 Gbps |
+| Comet, MPCache, FuseFSS, SHAFT (2025–26) | 1.2–3× gains per paper | – | – |
+
+- **No verified MPC result at 70B.** All LLM-scale results assume semi-honest servers.
+- **Deployment needs independent parties who never collude** (another cloud, another
+  jurisdiction). The user's machine becomes a full MPC party that moves gigabytes per
+  token.
+- **No company ships MPC or FHE evaluation of a whole LLM.** "Private LLM" products
+  (Nillion nilAI, Duality) actually run in TEEs. Arcium Blackthorn (private alpha, Oct
+  2026) uses MPC only to guard the keys of a GPU confidential-computing channel.
+- **For experiments:** SecretFlow SPU (PUMA's LLaMA-7B example) and EzPC/GPU-MPC (SIGMA).
+  CrypTen was archived in May 2025.
+
+---
+
+## 4. Confidential computing (TEEs): practical now, with hardware trust
+
+**How it works.** The model runs in a confidential VM (Intel TDX or AMD SEV-SNP). The GPU
+runs in NVIDIA confidential-computing mode (H100/H200, Blackwell B200/B300). Your client:
+
+1. checks a hardware-signed **attestation** of the exact software (and, ideally, the model
+   weights);
+2. compares it with reproducible builds in a transparency log;
+3. encrypts the prompt to a key that exists only inside the enclave, often through an
+   **OHTTP** relay that sees your IP address but not the content.
+
+Throughput overhead is **about 1–8%** when tuned. At batch size 1 it can double the cost
+per token.
+
+**Services where *your own client* verifies the attestation (Nov 2026):**
+
+| Service | Models | Notes |
+|---|---|---|
+| **Tinfoil** | Kimi K3.1 Pro, GLM-5.3, DeepSeek V4.1 Flash, Gemma 4 31B, gpt-oss-120b, Llama 3.3 70B | SDKs in 5 languages, in-browser verifier, model weights measured; OpenAI-compatible; GA |
+| **Privatemode** (Edgeless, EU-hosted) | gpt-oss-120b, Gemma 3, Qwen3, GLM-5.3-Flash | local verifying proxy; OpenAI- and Anthropic-compatible; GA. Pin the manifest |
+| **Cohere Model Vault Encrypted** | Cohere's own models + open models | client-side OHTTP proxy fails closed; public beta, US only |
+| **Confident Security CONFSEC / OpenPCC** | open models | the most Apple-PCC-like open design (Apache-2.0 client); early access |
+
+Phala/RedPill, NEAR AI Cloud and Nillion provide attestation but **don't verify by
+default**.
+- NEAR AI suffered an SGLang remote-code-execution breach on **8 Nov 2026**.
+- Venice's TEE mode delivers plaintext to Venice; only its e2ee mode encrypts on the
+  client.
+- Brave Leo's TEE path is verified by Brave's gateway, not by your browser.
+- **Proton Lumo uses no TEE:** prompts are encrypted to Proton's own servers.
+
+**Frontier closed models:** no API lets a developer reach a GPT-, Claude- or Gemini-class
+model with attestation that the developer's own client verifies.
+- OpenAI "Private Inference" (29 Sep 2026) is a sales-gated preview with undisclosed
+  details.
+- Anthropic published a design paper (2025) and licensed Opaque Systems' technology
+  (Oct 2026), but has no product.
+- Google Private AI Compute (Nov 2025) is for consumer Pixel features only.
+- Apple PCC (now also on Google Cloud, 2026 preview) is verified by Apple's OS, not by you.
+- Azure confidential inferencing never left preview.
+
+**What breaks TEEs:**
+- **Physical memory-bus interposers costing $50–$1,000** read memory and forge
+  attestations:
+  - WireTap (Sep 2025);
+  - Battering RAM ($47.62);
+  - TEE.fail (Oct 2025), which forged TDX quotes and "borrowed" NVIDIA GPU attestations;
+  - DDRop (Sep 2026), against fully patched TDX.
+  
+  Intel and AMD call physical attacks out of scope, yet **the cloud operator is exactly the
+  party with physical access.**
+- **Software bugs inside the enclave**, such as the NEAR breach.
+- **Metadata side channels:**
+  - Whisper Leak (Nov 2025) classifies the topic from packet sizes and timing at >98%
+    AUPRC across 28 LLMs.
+  - Token-length analysis reconstructed 29% of streamed responses.
+  - Prompt-cache timing leaked across users at 7 of 17 API providers.
+
+**Checklist if you use a TEE service:**
+- verify inside your own process;
+- pin the measurements and fail closed if they change;
+- require that the model weights are measured;
+- use an OHTTP relay run by a different party;
+- turn off streaming, or pad the output.
+
+---
+
+## 5. Prompt sanitization: the only route to GPT, Claude and Gemini
+
+You hide identifiers locally, send the rest, and restore the identifiers in the answer.
+This repo's gateway does exactly that (§9.4).
+
+**Evidence from the literature:**
+- **Utility:**
+  - Typed placeholders like `[PERSON_1]` cost about −0.6 on a 10-point quality scale for
+    writing tasks, and under 5 points on ARC, HellaSwag and IFEval.
+  - They collapse multi-document retrieval: RGB fell from 0.80 to 0.32.
+  - Stronger models lose more.
+  - 85.7% of the PII spans in real ShareGPT/WildChat prompts could be removed without
+    hurting the answer.
+- **Better methods:**
+  - **PAPILLON** (NAACL 2025): a local model rewrites the query. It leaks 7.5% of PII
+    units while 85.5% of answers are as good as with the raw query.
+  - **Prεεmpt** (NDSS 2026): format-preserving encryption plus metric differential
+    privacy, with a cryptographic definition (it still counts NER misses as leakage).
+  - For format-preserving encryption, NIST's SP 800-38G Rev. 1 draft keeps **only FF1**;
+    FF3 and FF3-1 are broken.
+- **The text around the redactions still identifies people:**
+  - LLMs infer personal attributes from text at 85.5% top-1 accuracy (Staab et al.,
+    ICLR 2024).
+  - In 2026, web-search agents **re-identified 26–40 of 53 interview transcripts after
+    Presidio redaction**. LLM deanonymization reaches 68% recall at 90% precision
+    (USENIX Security 2026).
+- **Detectors miss things on hard text:**
+  - On REDACT's most sensitive tier, recall is 0.07 for Presidio, 0.42 for GLiNER, 0.57 for
+    OpenAI's open Privacy Filter (Apr 2026), and 0.74–0.77 for GPT-4.1 or Claude
+    Sonnet 4.6 used as the detector.
+  - Uncommon or non-Western names are a weak spot everywhere.
+
+**When it works:** drafting, rewriting, translation, coding, classification, and reasoning
+where identities don't matter. **When it fails:** when the private value *is* the question
+("is a salary of X fair in city Y?"), when the task needs world knowledge about the hidden
+entity, or for medical or legal questions where the sensitive fact is the content.
+
+---
+
+## 6. The decision guide
 
 ```
-you type:       Draft a reply to Dr. Priya Rao (priya.rao@uni.edu, +91 98765 43210)
-                about Project Falcon. Priya asked whether card 4111 1111 1111 1111 was charged.
-provider sees:  Draft a reply to Dr. [PERSON_1] ([EMAIL_1], [PHONE_1]) about [TERM_1].
-                [PERSON_1] asked whether card [CREDIT_CARD_1] was charged.
-you read:       the answer, with the real values restored locally
+Is the data extremely sensitive (health, legal, identity documents, diaries)?
+ ├─ yes → local open-weight model (§7). Done. Nothing leaves the machine.
+ └─ no / need a bigger model
+     ├─ Is an open-weight model good enough?
+     │    └─ yes → TEE service whose SDK verifies attestation in YOUR process (§4)
+     │            + gateway as defense in depth + no streaming / padding
+     └─ Need a frontier closed model?
+          └─ gateway (regex + GLiNER) + zero-retention / no-training account
+             + strip context that isn't needed + assume the rest is visible
+             + avoid "Covered Models" that force retention (§8)
+Research (PhD-scale): FHE decode for 8B models, MPC, attacks on new obfuscators.
 ```
-
-Related research (⚠ from memory): **Prεεmpt** (format-preserving encryption plus metric
-differential privacy for numbers), **PAPILLON** (NAACL 2025: a local model rewrites the
-query for a remote model), **Hide-and-Seek**, **InferDPT**, **Split-N-Denoise**,
-**ConfusionPrompt**. Tools: Microsoft Presidio, LLM Guard, GLiNER-based PII detectors.
-
-**Limits. Be honest with yourself about these:**
-- Context re-identifies. "My advisor at a small lab in city X who works on Y" is
-  identifying with no names at all. LLMs infer age, location and occupation from writing
-  style (Staab et al., ICLR 2024 ⚠).
-- Detectors miss things, especially names without titles. Add your own term list or NER,
-  and note that the gateway fails closed only on values it already knows.
-- It doesn't fit tasks where the private value *is* the question ("is a salary of X fair
-  in city Y?").
-
-### C. Confidential computing (TEEs): practical today, if you accept hardware trust
-The model runs inside a CPU enclave (AMD SEV-SNP / Intel TDX) with the GPU in
-confidential-computing mode (NVIDIA H100/H200/Blackwell). Your client verifies a
-**remote attestation**, a hardware-signed measurement of the exact software stack, and
-encrypts the prompt to a key that exists only inside that enclave. Overhead is small
-(single-digit percent for large models ⚠).
-
-- **Big-provider systems (consumer features, not general APIs):** Apple Private Cloud
-  Compute (2024), Meta/WhatsApp Private Processing (2025), Google Private AI Compute
-  (Nov 2025), Azure confidential inferencing previews ⚠.
-- **Services a developer can use with open-weight models**, mostly via OpenAI-compatible
-  APIs: Tinfoil, Privatemode (Edgeless Systems), Phala/RedPill, NEAR AI Cloud, Confident
-  Security, Nillion nilAI, among others ⚠. Prefer those that publish open-source clients
-  that **verify attestation on your side**. Otherwise you are back to trusting a promise.
-  The gateway's `--base-url` points at any such endpoint.
-- **Known weaknesses:**
-  - The 2025 memory-bus interposer attacks (Battering RAM, WireTap, TEE.fail ⚠) broke
-    SGX/TDX/SEV-SNP confidentiality and attestation for an attacker with physical access,
-    which a cloud operator has.
-  - Response-length and timing side channels on streamed LLM output reveal topics
-    (Weiss et al. 2024; Microsoft "Whisper Leak" 2025 ⚠). TEEs don't hide those.
-
-### D. Secure multi-party computation (MPC)
-The prompt is secret-shared between 2–3 servers. No single server learns anything unless
-they collude. Transformer protocols (Iron, MPCFormer, PUMA, CipherGPT, BOLT, BumbleBee,
-SIGMA, Nimbus ⚠) bring 7B-class models to roughly **tens of seconds to minutes per token**,
-with **gigabytes of traffic per token** on a fast LAN. Softmax, GELU and LayerNorm dominate
-the cost. The deployment question, *who are the non-colluding parties?*, has no
-commercial answer for frontier models yet.
-
-### E. Fully homomorphic encryption (FHE): the literal answer to the question
-The client encrypts; the server evaluates the model on ciphertexts using plaintext weights,
-never holding the secret key; only the client can decrypt the output. CKKS (approximate
-arithmetic) suits neural networks. TFHE suits look-up-table non-linearities. Published
-systems (THE-X, NEXUS at NDSS 2025, Powerformer, "encryption-friendly LLM architectures" at
-ICLR 2025, Zama's encrypted GPT-2 attention head ⚠) handle BERT/GPT-2-scale models in
-**minutes per inference** on GPUs. Llama-class generation is not practical yet. The
-bottlenecks:
-1. bootstrapping (measured below: 12 s per refresh on our CPU);
-2. ciphertext × ciphertext products in attention (QKᵀ, softmax·V);
-3. polynomial approximations of softmax, GELU and LayerNorm;
-4. a KV cache that grows every token;
-5. 10³–10⁵× ciphertext expansion.
-
-Dedicated hardware (DARPA DPRIVE accelerators such as Intel's, plus start-up FHE chips ⚠)
-targets 100–10,000× speedups. That is the path to practical encrypted LLMs, probably years
-out. Homomorphic encryption already runs in production for simpler jobs, such as Apple's
-Live Caller ID Lookup and Enhanced Visual Search.
-
-### Things that look like encryption but are not
-| Idea | Why it fails |
-|---|---|
-| "Reply in a cipher / base64 / my secret code" | The operator runs the same model and can decode whatever it decodes. |
-| Send embeddings or hidden states instead of text | Inversion attacks recover the text (Vec2Text recovers ~92% of 32-token inputs exactly ⚠). |
-| Secretly permute the vocabulary (+ rotate the hidden space) | The operator matches against the public model. **Demonstrated here: 97–100% of the mapping recovered** (`cryptollm/attacks`). |
-| "Private mode" / "don't train on my data" toggles | Policy, not cryptography. Retention can be compelled by courts. |
 
 ---
 
-## 3. What we built and measured (this repo, 4-core cloud CPU, no GPU)
+## 7. Local models: how good is "never send it"?
 
-### 3.1 Encrypted language-model generation, end to end (`cryptollm/fhe`)
-A tiny character-level neural LM (64 → 96 → 33, quadratic activation so the encrypted
-pass needs no approximation) runs under CKKS at **128-bit security** (TenSEAL/SEAL, ring
-dimension 16384). The server runs in a **separate OS process**, receives only the public
-evaluation keys, and refuses a context that contains a secret key. The client holds the
-key, does the embedding lookup, decrypts the logits and picks the next character.
+- **Quality.** On the Artificial Analysis Intelligence Index v5 (27 Oct 2026), the best
+  closed model, Claude Opus 5.5, scores **58**. Kimi K3.1 Pro scores **46**. Its weights
+  were promised for 4 Nov 2026, and Tinfoil now serves it, but Artificial Analysis still
+  listed it as proprietary. Among models whose weights were downloadable when v5 launched,
+  the best scored **32**.
+- **Laptop models.** Models that fit a laptop are much stronger than a year ago, but trail
+  on hard agentic tasks.
+- **Memory needed:** about 0.58 bytes per parameter at 4-bit, plus the KV cache.
+
+| Hardware | Models | Speed |
+|---|---|---|
+| 16 GB laptop | gpt-oss-20b (MoE, 3.6B active), Qwen3.5-9B, Gemma 4 12B | gpt-oss-20b: 23–42 tok/s on an M4 with 32 GB |
+| 32 GB laptop | Gemma 4 31B / 26B-A4B, Qwen3.6-27B / 3.8-27B (~16–19 GB) | 27–31B dense: ~10–15 tok/s |
+| 1× RTX 5090 (32 GB) | Qwen3-32B | **61 tok/s** |
+| 80 GB GPU or 128 GB Mac | gpt-oss-120b, Qwen3.5-122B-A10B | – |
+| Multi-GPU server | DeepSeek V4, GLM-5.3, Kimi K3.1 Pro (~1.6 TB at 4-bit) | – |
+
+**Tools:** Ollama, llama.cpp, LM Studio, MLX, vLLM. Beware Ollama's `:cloud` models: they
+run on Ollama's servers.
+
+**Renting a GPU server** removes the model vendor from the picture but not the host. Only
+a TEE changes that.
+
+---
+
+## 8. Contracts, retention and the law (policy, not cryptography)
+
+| Service | Trains on your data? | Default retention | Zero data retention (ZDR) |
+|---|---|---|---|
+| OpenAI API | no (since Mar 2023) | up to 30 days (abuse logs) | approval via sales |
+| Anthropic API | no | within 30 days | by agreement. **"Covered Models" require 30-day retention and are excluded from ZDR** unless expressly authorized; flagged content is kept up to 2 years and classifier scores up to 7 |
+| Claude consumer apps | user choice since Oct 2025 | 5 years if training is on; 30 days if off | incognito chats are never used for training |
+| Gemini API: free tier / paid tier | free: **yes**, with human review / paid: no | paid: 55 days | – |
+| Azure OpenAI | no; content not available to OpenAI | flagged samples reviewed by Microsoft | modified abuse monitoring |
+| AWS Bedrock | no; model vendors never see prompts | new `data_retention` setting | `none` for most models; Claude Fable 5.x requires `aws_review` |
+| Vertex AI | no | caching ≤ 24 h; some logs 3–30 days | via configuration and account team |
+
+**Legal compulsion (NYT v. OpenAI):**
+- **13 May 2025:** the court ordered OpenAI to preserve *all* output logs, including chats
+  users had deleted. ZDR and Enterprise traffic were exempt.
+- **26 Sep 2025:** the duty ended, but the preserved logs are still held.
+- **20M de-identified logs** were ordered produced; the order was affirmed on
+  5 Jan 2026.
+
+**Other cases:**
+- Federal warrants for ChatGPT and Grok prompts (2025).
+- US v. Kim (Jun 2026): the court refused to quash a warrant for ChatGPT records.
+- An SDNY ruling held that a defendant's Claude chats were not privileged.
+
+**Status of the vendors' own encryption:**
+- OpenAI announced client-side encryption on its roadmap (Nov 2025); not shipped.
+- ChatGPT's "Locked Chats" (Oct 2026) are a PIN lock, not end-to-end encryption.
+
+**The anonymity layer** hides *who* you are but not what you wrote:
+- OHTTP (RFC 9458) and Privacy Pass;
+- Duck.ai, which strips IPs and gets providers to delete within 30 days;
+- OpenRouter, which can route only to ZDR endpoints but sees your plaintext;
+- Tor/VPN and anonymous payment.
+
+The content itself can still identify you.
+
+---
+
+## 9. What we built and measured (4-core cloud CPU, no GPU)
+
+### 9.1 Encrypted language-model generation (`cryptollm/fhe/encrypted_lm.py`)
+
+The model is a tiny character-level neural LM (64 → 96 → 33, quadratic activation). It runs
+under **CKKS at 128-bit security** (TenSEAL/SEAL, N = 16384). The server is a **separate
+OS process** that holds only public evaluation keys and refuses a secret key. The client
+does the embedding lookup, decryption and sampling.
 
 | | plaintext | encrypted |
 |---|---|---|
 | output for prompt `"the server "` | `never sees the math on the rig` | **identical** |
 | max logit error | – | 7 × 10⁻⁴ |
-| latency per character | 11 µs | 1.4 s (≈10⁵× slower) |
-| upload / download per character | 8 bytes | 1.05 MB / 8.7 MB |
-| one-time evaluation keys sent to the server | – | 180 MB |
+| latency per character | 11 µs | **1.4 s** (≈ 10⁵×) |
+| traffic per character | 8 B | 1.05 MB up / 8.7 MB down |
+| one-time evaluation keys | – | 180 MB |
 
-What the server still learns: the number of generated characters (one request each),
-timing, and sizes. Hiding those requires padding to a fixed length and fixed timing.
+We hit a real-world pitfall worth recording: TenSEAL's `matmul` is only correct on a
+*freshly encrypted* (slot-replicated) vector. A second layer applied after any
+multiplication silently returned wrong logits (error ≈ 11). We use per-output dot products
+for that layer instead.
 
-### 3.2 The cost of going deeper: bootstrapping (OpenFHE, `bench_bootstrap.py`)
-CKKS, 128-bit security, ring dimension 2¹⁶, 1024 slots, 4 threads:
-keygen 7.6 s and **7.1 GB of RAM**; **one bootstrap 11.9 s**; ciphertext × ciphertext
-multiply 148 ms; ciphertext × plaintext multiply 8.9 ms; rotation 155 ms.
+### 9.2 Cost of depth: CKKS bootstrapping (`cryptollm/fhe/bench_bootstrap.py`)
 
-**Back-of-envelope for an 8B-parameter model** (≈7 × 10⁹ multiply-accumulates per token).
-Even if every one of the 32,768 slots of a full ciphertext did useful work for every
-8.9 ms ct × pt multiply, the weight multiplications alone take ~2 × 10⁵ multiplies ≈
-30 minutes per token. That is before the comparable number of rotations at ~155 ms each,
-the bootstraps, and the attention and softmax approximations. So it is **hours per token on
-this CPU**. GPUs bring 10–100×; FHE ASICs promise more. That matches the literature: real
-today for small models, not yet for chat-scale LLMs.
+Setup: OpenFHE 1.6.1, 128-bit security, N = 2¹⁶, 1,024 slots, 4 threads.
 
-### 3.3 Privacy gateway (`cryptollm/gateway`)
-- **Detectors:** checksum-validated structured IDs (Luhn, IBAN mod-97, SSN rules, IPs),
-  emails, URLs, phones, API keys/tokens, titled names, your own term list, and optional
-  Presidio NER.
-- **Placeholders:** each value always gets the same placeholder. A name seen once is
-  hidden in later turns too, and so are its first and last names on their own.
-- **Fail-closed leak check** before anything is sent.
-- **Restoring the answer** works on streamed output, including placeholders split across
-  chunks.
-- **Vault:** placeholder mappings persist in a vault encrypted with AES-256-GCM under a
-  scrypt-derived key.
-- **Providers:** dry-run, any OpenAI-compatible endpoint (local or TEE services), and
-  Anthropic.
+| Operation | Result |
+|---|---|
+| Key generation | 7.6 s, **7.1 GB RAM** |
+| One bootstrap | **11.9 s** |
+| ct × ct multiply | 148 ms |
+| ct × pt multiply | 8.9 ms |
+| Rotation | 155 ms |
 
-### 3.4 Attack on "keyed vocabulary permutation" (`cryptollm/attacks`)
-The attacker uses rotation-invariant row signatures, then orthogonal Procrustes alignment.
-Against permutation alone, permutation plus a secret rotation, and up to 15% added noise,
-it recovers **97–100%** of the token mapping in seconds.
+GPUs bootstrap 350–800× faster, which is why every 8B result in §2 runs on 8 GPUs.
+
+### 9.3 Attack on "encrypt the tokens so the model can still read them" (`cryptollm/attacks/vocab_permutation.py`)
+
+**Setup:** a 3,000-token public embedding table. The defender applies a secret permutation,
+optionally a secret orthogonal rotation of the hidden space, and fine-tuning noise.
+
+**Attack:** rotation-invariant row signatures (norm plus sorted distances to all other
+rows), then orthogonal Procrustes on the confident matches, then re-matching.
+
+**Result:** the attacker recovers **100%** of the token mapping in every setting:
+permutation only, plus rotation, plus 5% noise, plus 15% noise. Runtime is ~2 s. This agrees
+with ConjFormer's row-norm attack, PMA (EMNLP 2026) and "Hidden No More" (ICML 2025) on
+real LLM tables.
+
+### 9.4 Privacy gateway and its measured leakage (`cryptollm/gateway`)
+
+**Pipeline:** detect → typed placeholders → leak check → send → restore locally (also for
+streamed output).
+
+**Detectors:**
+- checksum-validated IDs (Luhn, IBAN mod-97, SSN rules, IPs), emails, URLs and phones;
+- API keys: OpenAI, Anthropic, Stripe, AWS, GitHub, Slack, Google, Hugging Face, JWTs,
+  PEM private keys, plus a high-entropy token check;
+- context-triggered IDs: passport, PAN, MRN, account, booking reference, …;
+- titled names;
+- your own term list;
+- optional Presidio (spaCy `en_core_web_lg`) and optional **GLiNER** (`urchade/gliner_multi_pii-v1`).
+
+**Name handling:**
+- A name, once seen, is hidden in every later turn, including its first and last names on
+  their own.
+- Names that are also common words are never swept on their own, so "Will" and "Grace"
+  don't blank out ordinary words.
+- A name taken from an email address is hidden where it appears on its own in the same
+  text.
+
+**Safety and storage:** a fail-closed leak check runs before anything is sent. Mappings are
+kept in an AES-256-GCM + scrypt vault.
+
+**Leakage, realistic set.** 40 hand-written chat prompts with 67 direct identifiers,
+diverse and lowercase names, IDs from several countries, and 4 prompts containing no
+personal data. A value counts as hidden only if *every* letter and digit of *every*
+occurrence is masked.
+
+| | regex | + Presidio | + GLiNER | + GLiNER + Presidio |
+|---|---|---|---|---|
+| direct identifiers fully hidden | 43% | 84% | **98.5%** | 98.5% |
+| names hidden | 21% | 89% | **100%** | 100% |
+| prompts with nothing exposed | 26% | 74% | **97%** | 97% |
+| over-redaction (clean text masked) | 0.9% | 3.2% | 3.0% | 5.2% |
+| CPU time per prompt | < 1 ms | 7 ms | 131 ms | 141 ms |
+
+**Caveat:** we wrote this set and added the context-ID and secret detectors after seeing
+its first results. Before that, IDs were 56% and secrets 50% hidden. Treat it as a
+development set.
+
+**Leakage, PUPA (held-out, real prompts).** 901 *real* WildChat user prompts with annotated
+privacy units, from the PAPILLON paper (NAACL 2025). None of the gateway was tuned on it.
+
+_Results pending. The full run is in progress. Reproduce with `python -m cryptollm.gateway.evaluate --dataset pupa --configs regex,regex+presidio,regex+gliner,all,all+quasi`._
+
+**Reading the numbers:**
+- **Regex alone is fine for structured data and secrets, but useless for names.** Add
+  GLiNER: it runs on CPU at ~0.1 s per prompt.
+- **Detection is not anonymity.** §5 shows the remaining context can still identify
+  people.
 
 ---
 
-## 4. Recommendations
+## 10. Open research directions
 
-| Your situation | Do this |
-|---|---|
-| Very sensitive personal data (health, legal, finances, diaries) | **A**: a local open-weight model. Nothing leaves the machine. |
-| Need a strong model but can't run it locally | **C**: a TEE service that lets *you* verify attestation, plus **B** as defense in depth. |
-| Need GPT/Claude/Gemini specifically | **B**: the pseudonymization gateway, plus a zero-retention / no-training account. Assume the remaining text is visible. |
-| Hiding *who* is asking | add an OHTTP/anonymizing relay, and keep identifying details out of the text. |
-| Research direction | FHE/MPC-friendly architectures, gateway leakage evaluation, B+C hybrids, side-channel padding. |
+1. **FHE decode for open 8B models.** Today it costs 18 s/token on 8 GPUs. Promising
+   levers are encryption-friendly fine-tuning (softmax-free attention, low-degree
+   activations, LoRA under FHE), KV-cache packing, and GPU libraries (Cheddar, FIDESlib,
+   desilofhe).
+2. **Attacking 2026 obfuscators.** AloePri (deployed at 671B), GELO and ConjFormer have no
+   proofs. Our signature-plus-Procrustes attack is a natural starting point.
+3. **Measuring gateway leakage properly.** Combine detector recall (SPY, REDACT, PUPA)
+   with *LLM re-identification attacks* on the sanitized prompts, and report the
+   privacy/utility frontier.
+4. **A hybrid:** local gateway → TEE-hosted open model → frontier model only for de-identified
+   sub-questions (in the spirit of PAPILLON).
+5. **Side-channel-resistant serving:** padding, batching and constant-rate streaming against
+   Whisper Leak-style attacks on TEE and FHE services.
 
-## 5. Open research directions
-1. **Measure the gateway's leakage.** Use a re-identification benchmark: can a strong LLM
-   recover the hidden values or the user's attributes from the sanitized prompts?
-2. **Local–remote decomposition.** A local model splits the task so the remote model only
-   ever sees generic sub-questions (in the spirit of PAPILLON). Measure the utility/privacy
-   frontier.
-3. **FHE-friendly small LMs.** Polynomial activations, softmax-free attention, and
-   distillation into depth-budgeted models. §3.1 shows the inference path works; what's
-   missing is scale.
-4. **Hiding output length and timing** for TEE and FHE services: padding, batching and
-   constant-rate streaming.
+---
+
+## References (selected; all checked by the research agents unless marked *vendor*)
+
+**FHE:**
+- Park, Cheon, Stehlé et al. https://arxiv.org/abs/2601.18511
+- Fan et al. https://arxiv.org/abs/2609.12378
+- Cachemir https://arxiv.org/abs/2602.11470
+- Cerium https://arxiv.org/abs/2512.11269
+- NEXUS https://www.ndss-symposium.org/wp-content/uploads/2025-868-paper.pdf
+- THOR https://eprint.iacr.org/2024/1881
+- MOAI https://eprint.iacr.org/2025/991
+- Terrazzo https://eprint.iacr.org/2026/1870
+- Encryption-friendly LLM https://arxiv.org/abs/2410.02486
+- Zama GPT-2 https://huggingface.co/blog/encrypted-llm
+- Intel Heracles https://spectrum.ieee.org/fhe-intel
+- Apple HE https://machinelearning.apple.com/research/homomorphic-encryption
+- Google HEIR https://blog.google/security/how-google-is-making-private-ai-practical-with-homomorphic-encryption/
+
+**MPC / obfuscation:**
+- SIGMA https://petsymposium.org/popets/2024/popets-2024-0107.pdf
+- PUMA https://arxiv.org/pdf/2307.12533
+- BumbleBee https://ndss-symposium.org/wp-content/uploads/2025-57-paper.pdf
+- Hidden No More https://arxiv.org/abs/2505.18332
+- PMA https://arxiv.org/abs/2609.06749
+- ConjFormer https://arxiv.org/abs/2606.16461
+- AloePri https://arxiv.org/abs/2603.01499
+- Vec2Text https://arxiv.org/abs/2310.06816
+- Survey https://eprint.iacr.org/2026/105
+
+**TEE:**
+- Apple PCC https://security.apple.com/blog/private-cloud-compute/
+- PCC on Google Cloud https://security.apple.com/blog/expanding-pcc
+- Google Private AI Compute https://www.infoq.com/news/2025/11/google-private-ai-compute-tee
+- WhatsApp Private Processing https://engineering.fb.com/2025/04/29/security/whatsapp-private-processing/
+- Anthropic confidential inference https://www.anthropic.com/research/confidential-inference-trusted-vms
+- OpenAI Private Intelligence https://venturebeat.com/security/openais-new-private-intelligence-targets-a-growing-enterprise-concern-who-can-see-your-ai-data
+- Tinfoil https://tinfoil.sh *(vendor)*
+- Privatemode https://docs.privatemode.ai *(vendor)*
+- Cohere https://docs.cohere.com/docs/model-vault/encrypted/verifying-deployment *(vendor)*
+- OpenPCC https://github.com/openpcc/openpcc
+- TEE.fail https://tee.fail
+- Battering RAM https://batteringram.eu
+- WireTap https://wiretap.fail
+- DDRop https://thehackernews.com/2026/09/new-ddrop-attack-breaks-intel-tdx-and.html
+- NEAR breach https://thehackernews.com/2026/11/sglang-rce-exploit-breaches-near-ai.html
+- Whisper Leak https://arxiv.org/abs/2511.03675
+- Token-length attack https://arxiv.org/abs/2403.09751
+- Overheads https://arxiv.org/abs/2509.18886
+- Provider probe https://amiller.github.io/awesome-private-inference
+
+**Sanitization:**
+- Prεεmpt https://arxiv.org/abs/2504.05147
+- PAPILLON / PUPA https://arxiv.org/abs/2410.17127
+- Staab et al. https://arxiv.org/abs/2310.07298
+- Re-identification after redaction https://arxiv.org/abs/2605.30848
+- LLM deanonymization https://arxiv.org/abs/2602.16800
+- SPY https://arxiv.org/abs/2605.09973
+- REDACT https://arxiv.org/abs/2606.19881
+- Utility of pseudonymization https://aclanthology.org/2025.privatenlp-main.3.pdf and https://arxiv.org/abs/2609.11335
+- PII minimization https://arxiv.org/abs/2510.03662
+- NIST SP 800-38G r1 https://csrc.nist.gov/pubs/sp/800/38/g/r1/2pd
+- CipherChat https://arxiv.org/abs/2308.06463
+
+**Practical / policy:**
+- AA Intelligence Index v5 https://artificialanalysis.ai/articles/artificial-analysis-intelligence-index-v5
+- OpenAI data https://developers.openai.com/api/docs/guides/your-data
+- Anthropic retention https://platform.claude.com/docs/en/manage-claude/api-and-data-retention
+- Gemini terms https://aistudio.google.com/docs/terms
+- Bedrock retention https://docs.aws.amazon.com/bedrock/latest/userguide/data-retention.html
+- NYT order https://blogs.duanemorris.com/classactiondefense/2025/10/27/new-york-federal-courts-openai-discovery-orders-provide-key-insights-for-companies-navigating-ai-preservation-standards/
+- 20M logs https://natlawreview.com/article/when-chats-become-evidence-court-affirms-order-requiring-openai-produce-20-million
+- OHTTP https://datatracker.ietf.org/doc/rfc9458
+- Duck.ai https://duckduckgo.com/duckai/privacy-terms
+- OpenRouter https://openrouter.ai/docs/guides/privacy/logging
