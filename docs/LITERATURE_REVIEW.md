@@ -454,7 +454,45 @@ shift that needs only additions:
 
 ### 11.4 Bounded-attention fine-tuning pilot (`bounded_attention.py`)
 
-_Pending: the 1,500-step fine-tune (B = 4) is running; results will be added here._
+**Idea.** If every score lies in [−B, B], then exp(s) ∈ [e⁻ᴮ, eᴮ], and so does the row mean
+Z/n. The context length n is public, so softmax becomes a **fixed** pipeline with no max and no
+rounds:
+- Chebyshev exp on [−B, B], degree 13 (depth 4);
+- Chebyshev 1/x on [e⁻ᴮ, eᴮ], degree 247 (depth 8) for B = 4.
+
+**Pilot.** TinyStories-1M, fine-tuned for 1,500 steps (~3M tokens) on CPU, with two
+modifications:
+- softmax computed on scores clipped to [−4, 4];
+- a penalty on scores that fall outside the range.
+
+The "FHE-softmax" column runs exactly the polynomial pipeline above in plaintext, so it shows
+what the encrypted server would compute, minus CKKS noise.
+
+| TinyStories-1M, 300 held-out stories | Perplexity (exact softmax) | Perplexity (FHE-softmax, B = 4) | max \|score\| | scores outside [−4, 4] |
+|---|---|---|---|---|
+| Pre-trained | 6.23 | **137.0** | 282 | 59.8% |
+| Bounded fine-tune | 10.51 | **11.64** | 13.0 | 0.73% |
+| Control fine-tune (normal softmax, no penalty) | _pending_ | – | – | – |
+
+**What this shows**
+- Bounding works mechanically:
+  - the score range shrinks 22×;
+  - out-of-range scores fall from 60% to 0.7%;
+  - the max-free fixed pipeline becomes usable (perplexity 137 → 11.6).
+- Quality is **not** free at this budget: perplexity rises from 6.2 to 10.5–11.6.
+- 0.7% of scores still escape the bound. Clipping them is a comparison, so the encrypted circuit
+  cannot do it.
+- B = 4 alone cannot be the design. A tight B costs quality; a wide B makes the 1/x range
+  (e^{2B}) impractical.
+
+**Implications for the paper**
+1. Lead with the training-free shifts (§11.3).
+2. Use fine-tuning only to *tighten* the shift gap G that normalize-and-square must cover, not
+   to remove it.
+3. Convert by distillation (matching attention outputs, as in LoLCATs) rather than plain
+   language-model fine-tuning.
+4. Get the bound guaranteed by construction (QK-norm with a capped temperature), not by a
+   penalty.
 
 ---
 

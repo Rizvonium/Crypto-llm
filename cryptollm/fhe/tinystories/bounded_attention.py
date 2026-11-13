@@ -113,13 +113,13 @@ def score_stats(model, tok, texts, state, B):
     return st["absmax"], st["outside"] / st["total"]
 
 
-def finetune(model, tok, state, B, steps, lam, lr, batch=16, max_len=128, log_every=250):
+def finetune(model, tok, state, B, steps, lam, lr, batch=16, max_len=128, log_every=250, train_mode="clamped"):
     texts = load_stories("train", 20000)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.0)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda i: min(1.0, (i + 1) / 100) * 0.5 * (1 + math.cos(math.pi * i / steps)))
     model.train()
     rng = np.random.default_rng(0)
-    state.update(mode="clamped", B=B, penalty_on=lam > 0)
+    state.update(mode=train_mode, B=B, penalty_on=lam > 0)
     t0 = time.time()
     for step in range(steps):
         idx = rng.integers(0, len(texts), batch)
@@ -146,6 +146,8 @@ def main() -> None:
     ap.add_argument("--lam", type=float, default=1.0, help="weight of the out-of-range penalty")
     ap.add_argument("--lr", type=float, default=3e-4)
     ap.add_argument("--n-eval", type=int, default=300)
+    ap.add_argument("--control", action="store_true",
+                    help="control run: fine-tune with the ordinary softmax and no range penalty")
     args = ap.parse_args()
 
     torch.manual_seed(0)
@@ -165,8 +167,12 @@ def main() -> None:
     print(f"FHE softmax with B={args.B:g}: exp degree {fhe['exp_degree']} (depth {fhe['exp_depth']}), "
           f"1/x degree {fhe['inv_degree']} (depth {fhe['inv_depth']}) on [e^-B, e^B]; no max needed")
     report("pre-trained model")
-    finetune(model, tok, state, args.B, args.steps, args.lam, args.lr)
-    report(f"after bounded fine-tune ({args.steps} steps)")
+    if args.control:
+        finetune(model, tok, state, args.B, args.steps, 0.0, args.lr, train_mode="exact")
+        report(f"after control fine-tune ({args.steps} steps)")
+    else:
+        finetune(model, tok, state, args.B, args.steps, args.lam, args.lr)
+        report(f"after bounded fine-tune ({args.steps} steps)")
 
 
 if __name__ == "__main__":
