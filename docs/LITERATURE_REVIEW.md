@@ -531,6 +531,56 @@ This would need no calibration and could not fail on unseen inputs.
 guarantee would need training that shrinks the spectral norm of the bilinear form
 ‖W_q,hᵀ W_k,h‖₂ per head. That is a clean, novel use of fine-tuning (Idea 2), but future work.
 
+### 11.6 Confirmation: the full max-free softmax pipeline, emulated and encrypted
+
+**What was built.** `cryptollm/fhe/nas_softmax.py` implements normalize-and-square softmax with
+pluggable shifts and round rules:
+
+1. exp(x/2ᵏ) by Chebyshev;
+2. an approximate first normalization;
+3. k rounds of y ← y²/Σy², each with an approximate inverse (T is scale-invariant, so ~10%
+   accuracy suffices);
+4. one accurate final normalization.
+
+Every range and degree is public and calibrated. Rows are packed interleaved, so row sums are
+depth-0 rotations. The fitted shift is computed **homomorphically**: row mean by rotation-sum,
+sink score by masking and broadcast, together costing 1 level.
+
+`tinystories/nas_experiment.py` runs this on **real attention rows**: query position 127 of
+every head, n = 128 context, calibration and held-out sets split by story.
+
+**Emulation of the exact polynomial pipeline on all held-out rows**
+
+| Total softmax depth over all layers | Current practice (constant, M-rule) | Constant, G-rule | **Fitted shift, G-rule** | Worst-row precision | Rows leaving a domain |
+|---|---|---|---|---|---|
+| TinyStories-1M (8 layers, 2,992 rows) | 389 | 331 | **222 (−43%)** | ≈14.3 bits for all three | ≤0.10% |
+| GPT-2 small (12 layers, 2,244 rows) | 516 | 358 | **283 (−45%)** | ≥13.2 bits (fitted), 14.3 (current) | ≤0.13% |
+
+- With the fitted shift, k drops to 0–1 in 17 of the 20 layers, against 2–6 under current
+  practice.
+
+**Encrypted at 128-bit security** (OpenFHE CKKS, 35-bit scale, 4-core CPU). Eight held-out rows
+in one ciphertext, on the widest layer (TinyStories-1M layer 2):
+
+| Strategy | k | Levels used | Ring | Worst-row precision | Server time | Peak RAM |
+|---|---|---|---|---|---|---|
+| **Fitted shift, G-rule** | 1 | 28 | 2¹⁶ | **14.5 bits** | **15.3 s** | **3.0 GB** |
+| Constant, G-rule | 5 | 56 | 2¹⁷ | 9.0 bits | 69.9 s | 8.6 GB |
+| Current practice | 6 | 63 | 2¹⁷ | 6.9 bits | 76.2 s | 12.9 GB |
+
+**Reading the result**
+- The depth saving **compounds**:
+  - the shallower circuit fits the smaller ring (2¹⁶ vs 2¹⁷), so every operation is cheaper;
+  - **5× faster and ~4× less memory**;
+  - at an equal scale the deep circuits *lose precision* (6.9 vs 14.5 bits). Recovering that
+    precision would need a larger scale, then a larger ring or bootstrapping.
+- At a 40-bit scale, the 64-level current-practice circuit needs ring 2¹⁸ for 128-bit security.
+  That exceeds 15 GB of RAM, and the first attempt was killed.
+- Encrypted outputs match the emulation to 2×10⁻⁵ (fitted), which validates the emulation used
+  for the full-model tables.
+
+_GPT-2 layer 4, encrypted: pending; the run is in progress._
+
 ---
 
 ## 12. Proposed publishable work

@@ -233,6 +233,14 @@ class FheSoftmax:
         inv = cc.EvalChebyshevFunction(lambda t: 1 / t, self._rowsum(y), *plan.final_dom, deg["final"])
         return cc.EvalMult(y, inv)
 
+    def close(self) -> None:
+        """OpenFHE keeps contexts and evaluation keys in global caches: release them."""
+        import openfhe
+
+        self.cc.ClearEvalAutomorphismKeys()
+        openfhe.ClearEvalMultKeys()
+        openfhe.ReleaseAllContexts()
+
     def softmax(self, rows: np.ndarray):
         ct = self.encrypt(rows)
         t0 = time.perf_counter()

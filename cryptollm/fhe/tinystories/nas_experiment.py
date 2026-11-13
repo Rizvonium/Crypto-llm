@@ -88,11 +88,12 @@ def main() -> None:
     ap.add_argument("--no-fhe", action="store_true")
     ap.add_argument("--json", default=None)
     ap.add_argument("--scale-bits", type=int, default=35, help="CKKS scaling-modulus bits for the encrypted runs")
+    ap.add_argument("--models", default="roneneldan/TinyStories-1M,openai-community/gpt2")
     args = ap.parse_args()
 
     texts = load_stories("validation", 500)
     results = {}
-    for name in ["roneneldan/TinyStories-1M", "openai-community/gpt2"]:
+    for name in args.models.split(","):
         R = score_rows(name, texts)
         n_rows = len(next(iter(R.values())))
         nh = 16 if "TinyStories" in name else 12
@@ -137,7 +138,8 @@ def main() -> None:
                       f"{resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1e6:.1f} GB |", flush=True)
                 fres[tag] = {"k": plan.k, "depth": plan.depth(), "levels": lvl, "ring": fhe.cc.GetRingDimension(),
                              "bits_min": float(bits), "seconds": secs}
-                del fhe
+                fhe.close()
+                del fhe, y, emu
                 gc.collect()
             results[name]["fhe"] = {"layer": widest, **fres}
     if args.json:
