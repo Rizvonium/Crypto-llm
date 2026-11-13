@@ -483,14 +483,20 @@ what the encrypted server would compute, minus CKKS noise.
 |---|---|---|---|---|
 | Pre-trained | 6.23 | **137.0** | 282 | 59.8% |
 | Bounded fine-tune | 10.51 | **11.64** | 13.0 | 0.73% |
-| Control fine-tune (normal softmax, no penalty) | _pending_ | – | – | – |
+| Control fine-tune (normal softmax, no penalty) | 7.33 | 36.7 | 213 | 28.2% |
 
 **What this shows**
 - Bounding works mechanically:
   - the score range shrinks 22×;
   - out-of-range scores fall from 60% to 0.7%;
   - the max-free fixed pipeline becomes usable (perplexity 137 → 11.6).
-- Quality is **not** free at this budget: perplexity rises from 6.2 to 10.5–11.6.
+- Quality is **not** free at this budget. The control separates the two costs:
+  - our fine-tuning recipe alone drifts perplexity from 6.23 to 7.33 (+1.1);
+  - bounding the scores costs a further **+3.2** (7.33 → 10.51 exact, 11.64 on the FHE
+    pipeline).
+
+  A gentler recipe (lower learning rate, distillation) should shrink the first cost; the second
+  is the real price of B = 4.
 - 0.7% of scores still escape the bound. Clipping them is a comparison, so the encrypted circuit
   cannot do it.
 - B = 4 alone cannot be the design. A tight B costs quality; a wide B makes the 1/x range
