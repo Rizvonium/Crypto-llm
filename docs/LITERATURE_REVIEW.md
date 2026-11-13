@@ -452,6 +452,17 @@ shift that needs only additions:
 - The best reference depends on the model: GPT-2's first-token attention sink tracks the max,
   TinyStories' mean key does.
 
+**Against current practice.** Deployed normalize-and-square systems set k from the full
+calibrated width M = shift − row minimum (e.g., THEMIS/Odin). Same held-out protocol:
+
+| Total rounds | Constant shift, k from M (current practice) | Constant shift, k from G | **Fitted shift, k from G** |
+|---|---|---|---|
+| TinyStories-1M | 33 | 27 | **13 (2.5× fewer)** |
+| GPT-2 small | 42 | 19 | **9 (4.7× fewer)** |
+
+That is about **5 levels saved per layer** with no retraining. Reproduce with
+`python -m cryptollm.fhe.tinystories.shift_gap`.
+
 ### 11.4 Bounded-attention fine-tuning pilot (`bounded_attention.py`)
 
 **Idea.** If every score lies in [−B, B], then exp(s) ∈ [e⁻ᴮ, eᴮ], and so does the row mean
@@ -494,11 +505,153 @@ what the encrypted server would compute, minus CKKS noise.
 4. Get the bound guaranteed by construction (QK-norm with a capped temperature), not by a
    penalty.
 
+### 11.5 Certified (weights-only) gap bounds are far too loose
+
+**Idea.** LayerNorm fixes ‖x̂‖ = √d, and queries and keys are affine in LN(x). So the mean-key
+gap has a bound computed from public weights alone:
+
+G ≤ (‖BᵀA‖₂√d + ‖Bᵀc‖)·2√d·scale, with A = W_q,h·Γ, B = W_k,h·Γ, c = W_q,h·β + b_q,h.
+
+This would need no calibration and could not fail on unseen inputs.
+
+**Result.** On pre-trained weights the bound is useless:
+
+| Model | Certified bound vs measured 99.9th-pct gap | Total rounds |
+|---|---|---|
+| TinyStories-1M | 13–27× looser | 54 (vs 18 empirical) |
+| GPT-2 | 31–135× looser | 102 (vs 30 empirical) |
+
+**Consequence.** Calibrated bounds with a measured failure rate are the practical route. A
+guarantee would need training that shrinks the spectral norm of the bilinear form
+‖W_q,hᵀ W_k,h‖₂ per head. That is a clean, novel use of fine-tuning (Idea 2), but future work.
+
 ---
 
 ## 12. Proposed publishable work
 
-_Pending: a targeted novelty check of the two candidate contributions is running; the proposal will be finalized from its verdict._
+### 12.1 Novelty verdicts (targeted check, 13 Nov 2026)
+
+**Idea 1: training-free exact shifts → PARTIALLY DONE.** The general principle is published; the
+specific mechanisms were not found.
+
+*Already published:*
+- **Calibrated constant shifts:** NEXUS ("we take amax as a constant"), MOAI (per-layer
+  constants), THOR (calibrated midpoint), HEAT, EncryptedLLM, ATLAS, Sylph ("restrict to two
+  iterations"), Cachemir.
+- **THEMIS/Odin:** a *public statistical shift* Û, with k taken from the calibrated full width
+  M̂, and head-wise Û with k = max_h k_h.
+- **"Statistical max" μ + cσ** (Tricycle, ARION, ELLMo): needs σ, so it adds depth and relies on
+  a distributional assumption.
+- **CGF-softmax:** shift μ + σ²/2 + ln n with a fine-tuned approximate normalizer.
+- **SOAL** (ICLR'26, *MPC*): "Conformant Maxima" at BOS, first and last positions replace the
+  max.
+- **Sylph:** a static sink prefix, used only to shrink ranges.
+- **SageAttention:** the mean-key identity, used for INT8 quantization.
+- **Cho et al.** note that "underflow is only an issue … if the largest coordinates … underflow",
+  yet still set k = ⌈log M − log ln n⌉.
+
+*Not found:*
+- (a) the rule and analysis that k depends on the high-side gap G and ln n, not on M;
+- (b) exact data-dependent shifts under HE (mean-key score via the KV key-sum; sink score) and
+  calibrated linear combinations of them;
+- (c) Samuelson-type certified bounds;
+- (d) per-head G distributions as the design variable.
+
+**Idea 2: provably bounded attention → PARTIALLY DONE.**
+
+*Already published:*
+- **PowerSoftmax:** uses the public L to normalize by the mean, with loss-based (not
+  guaranteed) bounds.
+- **HEAT:** "the clamps are a training-time guard only".
+- **Encryption-friendly LLM, Zimerman et al., Baruch et al.:** penalties and estimates.
+- **Powerformer:** a fixed-constant denominator.
+
+*Not found:* logit bounds guaranteed by the architecture or the weights, used to run exact
+softmax on fixed-domain polynomials.
+
+*Our own data argue against making this the headline:*
+- certified bounds are 13–135× loose (§11.5);
+- a naive bounded fine-tune costs perplexity (§11.4).
+
+### 12.2 Recommended paper
+
+**Working title: "Mind the Gap: Exact Zero-Depth Shifts for Max-Free Homomorphic Softmax in
+LLM Inference."**
+
+**Claims**
+- **C1 (analysis).** In normalize-and-square softmax, the number of rounds and the precision are
+  governed by the high-side gap G = shift − row max, together with ln n, not by the total range
+  M. This holds as long as the first exp polynomial covers the low tail [−M/2ᵏ, G/2ᵏ] and stays
+  bounded and non-negative there. The low tail costs a few levels *once* (Chebyshev degree 11–42
+  for M = 16–240), whereas each avoided round saves about 2 levels. The proof extends Cho et
+  al.'s error analysis.
+- **C2 (method).** A family of exact shifts costing at most one level:
+  - the calibrated constant Û;
+  - the mean-key score (one extra "virtual key" — the running key sum — in the KV cache);
+  - the sink score (static public prefix or first token);
+  - a per-head calibrated linear combination of these.
+
+  k stays public and is set from a per-head calibrated bound on G.
+- **C3 (evidence).**
+  - Rounds drop 33→13 (TinyStories-1M) and 42→9 (GPT-2) against current practice, on
+    held-out text (§11.3).
+  - Extend to Pythia-160M/410M, GPT-2-medium, Qwen-0.5B and Llama-3.2-1B using plaintext
+    traces.
+  - Validate end to end in OpenFHE: softmax precision (bits), levels, bootstraps and latency on
+    real attention rows.
+  - Head-to-head on one backend against THEMIS Û, μ + cσ (Tricycle/ARION/ELLMo), a SOAL-style
+    sink shift and CGF.
+- **C4 (robustness).**
+  - Failure rates under distribution shift (TinyStories → WikiText/C4).
+  - Adversarial prompts optimized to maximize G.
+  - Safeguards (margin, domain-extension polynomials) and their level cost.
+  - The certified-bound gap (§11.5) as a negative result.
+
+**Experiment plan (CPU-feasible; GPU optional for end-to-end Llama numbers)**
+1. Implement Cho et al.'s normalize-and-square softmax in OpenFHE-python with a pluggable shift
+   and k. Check its precision against the paper.
+2. Add trace collection for more model families (RoPE models need post-rotary q and k hooks)
+   and datasets.
+3. Implement baselines: constant + M-rule, μ + cσ (counting the depth of σ), sink-only.
+   Cite CGF and ROSETTA as orthogonal.
+4. Measure levels, bootstraps and latency per decode step in OpenFHE on TinyStories/GPT-2
+   layers.
+5. Project to Llama-3-8B by feeding the measured round savings into Sylph's and Cachemir's
+   published per-layer breakdowns. State clearly that this is an estimate.
+6. Run the adversarial and out-of-distribution failure study.
+
+**Venues.**
+- Crypto/systems security: CCS, USENIX Security, PoPETs.
+- ML: ICML, NeurIPS, ICLR (privacy/efficiency).
+- An early short version at WAHC (with CCS) or a PPML workshop.
+
+**Rough timeline.** 2–3 months to a workshop or short paper (C1–C3); +2 months for C4 and the
+broader model sweep.
+
+### 12.3 Alternative paper: encrypt only what is private
+
+The approach has three parts:
+- **Redact-then-Bind:** the public prompt carries typed placeholders, and an encrypted suffix
+  binds them to the real values. This runs on a Sylph-style pipeline.
+- **Secret-isolated attention:** a Block-Attention-style fine-tune that stops public tokens from
+  depending on secrets.
+- **A Pr∈∈mpt-style leakage function:** public text, positions, bucketed lengths, types and
+  detector misses.
+
+Evaluation: encrypted-token budget vs leakage vs quality on the 901 PUPA prompts, using the
+gateway already built here. An add-on is an attack showing that "public" RAG context, chosen by
+the private query, leaks that query, with a k-anonymous context defence.
+
+Novelty risk is low–medium. It is a natural PoPETs/USENIX paper and largely orthogonal to §12.2.
+
+### 12.4 Risks and mitigations
+
+| Risk | Mitigation |
+|---|---|
+| ARION/Tricycle may already compute μ inside QKᵀ | Read their full texts; put the G-rule analysis and sink/fitted shifts at the core; benchmark against μ + cσ |
+| Gains may shrink when outliers are already suppressed (Sylph needs only 2 iterations on Llama-3-8B with a sink prefix + rotations) | Report across model families with and without those tricks; show complementarity |
+| The 0.1% undershoot rows | Analyze graceful degradation; plot margin vs rounds |
+| CPU-only resources | Plaintext-emulated pipelines for large models; OpenFHE on small ones; GPU later for end-to-end numbers |
 
 ---
 
