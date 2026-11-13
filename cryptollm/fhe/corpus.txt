@@ -1,0 +1,27 @@
+the server never sees the message. the client encrypts the words with a secret key and sends only noise to the cloud. the cloud does the math on the noise and returns more noise. only the client can turn the noise back into words.
+
+a secret is safe when nobody else holds the key. the key stays at home. the data travels, but the meaning stays behind. this is the promise of computing on encrypted data: the machine works for you without ever learning what it is working on.
+
+the model reads one letter at a time. it looks at the last few letters, guesses the next one, and writes it down. then it looks again and guesses again. a large model does the same thing with words instead of letters, and with many more layers of thinking in between.
+
+when you ask a question to a chat assistant, your words travel to a data center far away. a company runs the model, sees the question, and sees the answer. most of the time this is fine. sometimes the question is about your health, your money, your family, or your work, and then it matters who can read it.
+
+there are a few ways to keep a secret while asking for help. you can run the model on your own computer, so the words never leave the room. you can send the words to a sealed box that even its owner cannot open. you can split the secret into pieces and give each piece to a different helper. you can hide the names and numbers before you ask, and put them back when the answer arrives. or you can encrypt everything and let the machine compute on the locked data.
+
+each way has a price. the sealed box asks you to trust the people who built the chip. the pieces ask you to trust that the helpers never meet. hiding the names works only when the names are not the point of the question. computing on locked data is the strongest promise of all, but it is slow, and the bigger the model, the slower it gets.
+
+a good lock is simple to use and hard to break. a good model is helpful and honest. a good system keeps both promises at the same time: it gives you a useful answer and it keeps your secret.
+
+the noise in the message grows a little with every step. after many steps the noise becomes too loud and the meaning is lost. so the system must stop and clean the noise, a step called bootstrapping. cleaning takes time, and a deep model needs to clean many times.
+
+think of a letter in a locked glass box. the helper can move the box, shake it, and fold it, but cannot open it. when the box comes back, you open it with your key and read the answer inside. the helper did the work, and the helper learned nothing.
+
+the price of privacy is paid in time, in memory, and in trust. we can pay with time and memory, or we can pay with trust. the art is to choose the price that fits the secret.
+
+some secrets are small, like a phone number or a name. some secrets are large, like a medical history or a private diary. a small secret can be hidden with a mask. a large secret needs a stronger lock, or it should never leave home at all.
+
+the river runs past the old mill and the children watch the water turn the wheel. the baker opens the shop before the sun rises, and the smell of bread fills the street. the teacher writes a question on the board and waits for the class to think.
+
+every morning the market fills with voices. people trade fruit and fish and stories. the old woman at the corner sells tea and knows the name of every child in the town. she keeps many secrets, and she has never told a single one.
+
+a careful engineer writes down what the system must protect, who might try to read it, and what each defender is trusted to do. only then does she choose the lock. the wrong lock on the right door is as bad as no lock at all.

@@ -1,0 +1,22 @@
+[project]
+name = "cryptollm"
+version = "0.1.0"
+description = "Experiments in keeping LLM prompts private: a pseudonymizing privacy gateway, encrypted (FHE) language-model inference, and attacks on naive 'encrypted prompt' schemes."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "cryptography>=42",
+]
+
+[project.optional-dependencies]
+fhe = ["tenseal>=0.3.15"]
+bootstrap = ["openfhe>=1.2"]   # wheels currently ship a CPython 3.12 binary
+ner = ["presidio-analyzer>=2.2"]
+dev = ["pytest>=8"]
+
+[tool.setuptools.packages.find]
+include = ["cryptollm*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
