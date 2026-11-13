@@ -35,3 +35,11 @@ def test_vocab_permutation_is_recoverable():
     E = make_public_embeddings(V=800, d=32)
     E_priv, pi = obfuscate(E, rotate=True, noise=0.05)
     assert (recover_permutation(E, E_priv) == pi).mean() > 0.95
+
+
+def test_encrypted_attention_step_matches_plaintext():
+    pytest.importorskip("openfhe")  # CPython 3.12 wheels; needs ~3 GB RAM
+    from cryptollm.fhe.encrypted_attention import main
+
+    out = main(verbose=False)
+    assert out["max_error"] < 1e-6

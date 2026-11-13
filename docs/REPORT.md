@@ -21,7 +21,7 @@ Gemini unless the provider builds it.**
 | A server computes the answer and *mathematically* never sees it | **Fully homomorphic encryption (FHE).** Llama-3-8B runs end to end at **18 s per token on 8 GPUs**, about $0.08/token, so a 500-token answer takes ≈ 2.5 h (§2) | maths only (lattice hardness) | ≈ 10³–10⁴× plaintext on GPUs; research code only |
 | Same, by splitting trust | **Multi-party computation (MPC).** Llama2-7B: 23 s per forward pass on 2 GPUs plus 255 GB of dealer keys, or 200 s/token on 3 CPU servers (§3) | the servers don't collude | 10²–10⁴×, gigabytes per token; no product |
 | A big open model at normal speed, operator locked out | **Confidential computing (TEE)** with attestation **checked by your own client**: Tinfoil, Privatemode, Cohere Model Vault Encrypted (beta), OpenPCC (§4) | Intel/AMD/NVIDIA, and that nobody with physical access has tampered with the machine | ≈ 1–8% overhead |
-| GPT/Claude/Gemini specifically | **Hide the identifiers** with a local gateway (§5, built here), plus a zero-retention account (§8) | the provider still sees the remaining text and its context | small quality loss on most tasks (≈ −0.6/10 on writing, < 5 points on benchmarks); fails when the hidden value *is* the question |
+| GPT/Claude/Gemini specifically | **Hide the identifiers** with a local gateway (§5, built here), plus a zero-retention account (§8) | the provider still sees the remaining text and context. On 901 real prompts our best local detector stack still missed 20% of annotated private units (§9.5) | small quality loss on most tasks (≈ −0.6/10 on writing, < 5 points on benchmarks); fails when the hidden value *is* the question |
 
 **Two facts behind every row:**
 
@@ -44,7 +44,7 @@ Gemini unless the provider builds it.**
 | Idea | Status | Evidence |
 |---|---|---|
 | "Encrypt" the prompt with a secret cipher that the model is told how to decode | **No privacy** | The cipher has to travel inside the prompt, so the operator decodes it too. CipherChat (ICLR 2024) shows GPT-4 can work in ciphers *when the prompt explains them* |
-| Keyed token / vocabulary substitution with a matching embedding layer (SentinelLMs, AlienLM, STIP) | **Broken** | A ciphertext-only attack recovers 70–95% of tokens (PMA, EMNLP 2026). Under a secret rotation, row-norm matching recovers ~100% (ConjFormer 2026). **Our attack: 100% of a 3,000-token mapping**, including rotation and 15% noise (§9.3) |
+| Keyed token / vocabulary substitution with a matching embedding layer (SentinelLMs, AlienLM, STIP) | **Broken** | A ciphertext-only attack recovers 70–95% of tokens (PMA, EMNLP 2026). Under a secret rotation, row-norm matching recovers ~100% (ConjFormer 2026). **Our attack: 100% of a 3,000-token mapping**, including rotation and 15% noise (§9.4) |
 | Permute the hidden states (PermLLM, STIP, Centaur) | **Broken** | 97.6–99.9% of prompts decoded perfectly on Llama-3.1-8B and Gemma-2 ("Hidden No More", ICML 2025) |
 | Send embeddings or middle-layer activations instead of text | **Broken** | Vec2Text recovers 92% of 32-token inputs exactly. 86.88 token-F1 from a Llama-3 middle layer on a 4,112-token prompt (USENIX Security 2025) |
 | Add decoy queries (k-anonymity) | **Weak** | The real sub-prompts still go out in plaintext |
@@ -206,7 +206,7 @@ model with attestation that the developer's own client verifies.
 ## 5. Prompt sanitization: the only route to GPT, Claude and Gemini
 
 You hide identifiers locally, send the rest, and restore the identifiers in the answer.
-This repo's gateway does exactly that (§9.4).
+This repo's gateway does exactly that (§9.5).
 
 **Evidence from the literature:**
 - **Utility:**
@@ -234,6 +234,13 @@ This repo's gateway does exactly that (§9.4).
     OpenAI's open Privacy Filter (Apr 2026), and 0.74–0.77 for GPT-4.1 or Claude
     Sonnet 4.6 used as the detector.
   - Uncommon or non-Western names are a weak spot everywhere.
+
+**Our measurement (§9.5):**
+- On 901 real WildChat prompts, regex detectors alone hid **4%** of annotated private
+  units.
+- Adding the GLiNER and Presidio NER models, with organisations and places hidden too,
+  raised that to **80%**: 75% of prompts left with nothing exposed, at 8.6% over-redaction.
+- Our own hand-written prompts suggested 98.5%. Development sets flatter detectors.
 
 **When it works:** drafting, rewriting, translation, coding, classification, and reasoning
 where identities don't matter. **When it fails:** when the private value *is* the question
@@ -347,7 +354,40 @@ We hit a real-world pitfall worth recording: TenSEAL's `matmul` is only correct 
 multiplication silently returned wrong logits (error ≈ 11). We use per-output dot products
 for that layer instead.
 
-### 9.2 Cost of depth: CKKS bootstrapping (`cryptollm/fhe/bench_bootstrap.py`)
+### 9.2 One encrypted attention decode step, softmax included (`cryptollm/fhe/encrypted_attention.py`)
+
+This is the operation an LLM repeats for every generated token in every head of every
+layer: the new token's query attends over an **encrypted KV cache**. It uses OpenFHE CKKS
+at 128-bit security (N = 2¹⁶, 1,024 slots).
+
+**Server side:**
+- Computes the Q/K/V projections with baby-step/giant-step diagonal matvecs.
+- Appends the new key and value to the encrypted cache.
+- Computes the scores ⟨q, kⱼ⟩/√d with packed ciphertext × ciphertext products and
+  rotate-and-sum.
+- Evaluates **softmax homomorphically**: Chebyshev polynomials of exp(x) on [−1.5, 1.5]
+  and 1/x on the possible range of the sum.
+- Weights the values and applies the output projection.
+
+Nothing is decrypted on the server.
+
+| d_model 32, head dim 16, 8-token context | plaintext | encrypted |
+|---|---|---|
+| time per decode step (1 head) | 14 µs | **8.5 s** (≈ 6 × 10⁵×) |
+| max error vs exact softmax attention | – | **2 × 10⁻¹⁰** |
+| multiplicative levels used / budget | – | 21 / 24 (no bootstrapping inside the step) |
+| peak RAM (keys + data) | – | 2.9 GB |
+
+**Lessons:**
+- FHE needs a **known input range** for every non-polynomial function. We rescale Wq so
+  scores stay within [−1.5, 1.5]. Real systems handle LLM outlier activations with extra
+  machinery.
+- **Each Chebyshev approximation costs 5–7 multiplicative levels.** Our first version ran
+  out of levels: decryption failed with "approximation error is too high".
+- **A multi-layer model must bootstrap between layers** (§9.3). That is why the 8B results
+  in §2 run on 8 GPUs.
+
+### 9.3 Cost of depth: CKKS bootstrapping (`cryptollm/fhe/bench_bootstrap.py`)
 
 Setup: OpenFHE 1.6.1, 128-bit security, N = 2¹⁶, 1,024 slots, 4 threads.
 
@@ -361,7 +401,7 @@ Setup: OpenFHE 1.6.1, 128-bit security, N = 2¹⁶, 1,024 slots, 4 threads.
 
 GPUs bootstrap 350–800× faster, which is why every 8B result in §2 runs on 8 GPUs.
 
-### 9.3 Attack on "encrypt the tokens so the model can still read them" (`cryptollm/attacks/vocab_permutation.py`)
+### 9.4 Attack on "encrypt the tokens so the model can still read them" (`cryptollm/attacks/vocab_permutation.py`)
 
 **Setup:** a 3,000-token public embedding table. The defender applies a secret permutation,
 optionally a secret orthogonal rotation of the hidden space, and fine-tuning noise.
@@ -374,7 +414,7 @@ permutation only, plus rotation, plus 5% noise, plus 15% noise. Runtime is ~2 s.
 with ConjFormer's row-norm attack, PMA (EMNLP 2026) and "Hidden No More" (ICML 2025) on
 real LLM tables.
 
-### 9.4 Privacy gateway and its measured leakage (`cryptollm/gateway`)
+### 9.5 Privacy gateway and its measured leakage (`cryptollm/gateway`)
 
 **Pipeline:** detect → typed placeholders → leak check → send → restore locally (also for
 streamed output).
@@ -384,6 +424,8 @@ streamed output).
 - API keys: OpenAI, Anthropic, Stripe, AWS, GitHub, Slack, Google, Hugging Face, JWTs,
   PEM private keys, plus a high-entropy token check;
 - context-triggered IDs: passport, PAN, MRN, account, booking reference, …;
+- account names inside home-directory paths;
+- ws/wss/ftp/ssh/git URLs as well as http(s);
 - titled names;
 - your own term list;
 - optional Presidio (spaCy `en_core_web_lg`) and optional **GLiNER** (`urchade/gliner_multi_pii-v1`).
@@ -419,11 +461,42 @@ development set.
 **Leakage, PUPA (held-out, real prompts).** 901 *real* WildChat user prompts with annotated
 privacy units, from the PAPILLON paper (NAACL 2025). None of the gateway was tuned on it.
 
-_Results pending. The full run is in progress. Reproduce with `python -m cryptollm.gateway.evaluate --dataset pupa --configs regex,regex+presidio,regex+gliner,all,all+quasi`._
+| 901 real prompts, 2,220 annotated units | regex | + Presidio | + GLiNER | + GLiNER + Presidio | + GLiNER (with orgs/places) + Presidio |
+|---|---|---|---|---|---|
+| privacy units fully hidden | 4.1% | 42.1% | 38.9% | 54.1% | **80.0%** |
+| prompts with nothing exposed | 4.2% | 33.1% | 30.6% | 46.1% | **75.2%** |
+| over-redaction (clean text masked) | 0.7% | 3.2% | 3.6% | 5.6% | 8.6% |
+| CPU time per prompt | 1 ms | 27 ms | 468 ms | 555 ms | 498 ms |
+
+PUPA counts organisations, places and products as private units. That is why hiding them
+(the last column) matters so much.
+
+**What is still exposed in the best setting.** In a random sample of 40 of the 443
+exposed units:
+- **About one third are real personal identifiers:**
+  - lowercase lone first names and surnames ("tim", "aida", "d'amico");
+  - usernames;
+  - bare ID numbers with no cue word;
+  - an account name inside a file path;
+  - a `wss://` URL.
+- **About a quarter are company and brand names.**
+- **About a quarter are annotation noise or not personal:** pronouns such as "her" and
+  "his", WildChat's own `presidio_anonymized_…` placeholders, book titles.
+- **The rest are code identifiers.**
+
+We then added the home-path and URL-scheme detectors. The PUPA numbers above were measured
+*before* those additions, so they remain an unbiased held-out result.
 
 **Reading the numbers:**
-- **Regex alone is fine for structured data and secrets, but useless for names.** Add
-  GLiNER: it runs on CPU at ~0.1 s per prompt.
+- **Our own set overstated the protection.** It reports 98.5% of direct identifiers
+  hidden (regex + GLiNER), but on real prompts that setup hid **39%** of annotated units.
+  The best stack hid 80% (75% of prompts fully clean) at 8.6% over-redaction. **Evaluate
+  on held-out real data.**
+- **Regex alone is fine for structured data and secrets, but useless for everything
+  else** (4% on PUPA).
+- **NER models help a lot and run on CPU in about 0.1–0.5 s per prompt.** On a laptop it
+  is worth running GLiNER and Presidio together, with organisations and places hidden too,
+  unless the task needs them.
 - **Detection is not anonymity.** §5 shows the remaining context can still identify
   people.
 

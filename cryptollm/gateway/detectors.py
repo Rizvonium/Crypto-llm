@@ -81,7 +81,14 @@ def phone_ok(s: str) -> bool:
 
 
 EMAIL = RegexDetector("EMAIL", r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
-URL = RegexDetector("URL", r"\bhttps?://[^\s<>\"')\]]+")
+URL = RegexDetector("URL", r"\b(?:https?|wss?|ftps?|sftp|ssh|git)://[^\s<>\"')\]]+")
+# The account name inside home-directory paths (/home/alice/..., /Users/alice/..., C:\Users\alice\...)
+HOME_PATH_USER = RegexDetector(
+    "USERNAME",
+    r"(?:/home/|/Users/|[A-Za-z]:\\Users\\|[A-Za-z]:/Users/)([A-Za-z0-9._-]{2,})",
+    lambda u: u.lower() not in {"shared", "public", "default", "all users", "admin", "user", "username", "runner", "ubuntu"},
+    group=1,
+)
 CREDIT_CARD = RegexDetector("CREDIT_CARD", r"\b(?:\d[ -]?){12,18}\d\b", luhn_ok)
 IBAN = RegexDetector("IBAN", r"\b[A-Z]{2}\d{2}(?: ?[A-Z0-9]){11,30}\b", iban_ok)
 SSN = RegexDetector("US_SSN", r"\b\d{3}-\d{2}-\d{4}\b", ssn_ok)
@@ -235,7 +242,7 @@ class GlinerDetector:
 
 
 DEFAULT_DETECTORS: list[Detector] = [SECRET, EMAIL, URL, IBAN, CREDIT_CARD, SSN, IPV4, IPV6, PHONE,
-                                     ContextualIdDetector(), HIGH_ENTROPY, HONORIFIC_NAME]
+                                     ContextualIdDetector(), HIGH_ENTROPY, HOME_PATH_USER, HONORIFIC_NAME]
 
 
 def detect_all(text: str, detectors: Iterable[Detector]) -> list[Span]:

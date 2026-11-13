@@ -17,7 +17,8 @@ only we can read?
   hardware.
 - **GPT/Claude/Gemini:** no attested API that you can verify yourself. Your options are a
   local pseudonymization gateway (built here) and zero-retention contracts, which courts
-  can override.
+  can override. The gateway hid 80% of annotated private units in 901 real prompts.
+  It helps, but it is not encryption.
 - **Tricks that don't work:** "cipher prompts", sending embeddings, and secretly permuted
   vocabularies or hidden states. This repo breaks the permuted-vocabulary idea.
 
@@ -26,6 +27,7 @@ only we can read?
 | Path | What it does |
 |---|---|
 | `cryptollm/fhe/encrypted_lm.py` | Encrypted text generation (CKKS, 128-bit). The server is a separate process holding only public keys; the output is identical to plaintext. |
+| `cryptollm/fhe/encrypted_attention.py` | One attention decode step over an **encrypted KV cache**, softmax evaluated homomorphically (OpenFHE, 128-bit). |
 | `cryptollm/fhe/bench_bootstrap.py` | OpenFHE bootstrapping benchmark: why deep models are slow. |
 | `cryptollm/gateway/` | Privacy gateway: detect → pseudonymize → leak check → send → restore. Encrypted vault; providers: dry-run, any OpenAI-compatible endpoint (local or TEE services), Anthropic. |
 | `cryptollm/gateway/evaluate.py` | Leakage benchmark: our 40 realistic prompts, and 901 real WildChat prompts (PUPA). |
@@ -40,6 +42,9 @@ uv pip install -e ".[fhe,dev]"                                # numpy, cryptogra
 
 # 1. Encrypted generation: the server only ever sees ciphertext
 python -m cryptollm.fhe.encrypted_lm "the server " -n 30 --separate-process
+
+# 1b. One encrypted attention step with homomorphic softmax (uv pip install openfhe; ~3 GB RAM)
+python -m cryptollm.fhe.encrypted_attention
 
 # 2. Privacy gateway (dry run: nothing is sent; shows exactly what would be)
 python -m cryptollm.gateway --terms "Project Falcon" \
@@ -66,6 +71,8 @@ python -m pytest -q
 | | plaintext | encrypted / protected |
 |---|---|---|
 | tiny LM, per character (CKKS, 128-bit) | 11 µs | 1.4 s, output identical; ~1 MB up / 8.7 MB down |
+| one attention decode step, encrypted KV cache + softmax (OpenFHE, 128-bit) | 14 µs | 8.5 s, error 2×10⁻¹⁰ |
 | one CKKS bootstrap (N = 2¹⁶) | – | 11.9 s, 7 GB of keys in RAM |
-| gateway on 40 realistic prompts: direct identifiers hidden | – | regex 43% → regex+GLiNER **98.5%** (names 21% → 100%) |
+| gateway on **901 real prompts** (PUPA): private units hidden | – | regex 4% → GLiNER + Presidio 54% → **80%** when orgs/places are also hidden (8.6% over-redaction) |
+| gateway on our 40 hand-written prompts: direct identifiers hidden | – | regex 43% → regex+GLiNER 98.5% (a development set; it flatters the detectors) |
 | vocabulary-permutation "encryption" | – | attacker recovers **100%** of the mapping |

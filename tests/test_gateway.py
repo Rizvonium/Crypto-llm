@@ -110,3 +110,16 @@ def test_email_local_part_reveals_a_name():
     p = Pseudonymizer()
     out = p.anonymize("ask anjali (anjali.k@gmail.com) to call me")
     assert "anjali" not in out.lower() and "[EMAIL_1]" in out
+
+
+@pytest.mark.parametrize("text,value", [
+    ("open /home/rickard/documents/new copy.py", "rickard"),
+    ("C:\\Users\\meera.k\\Desktop\\thesis.docx is locked", "meera.k"),
+    ("cd /Users/jdoe/projects", "jdoe"),
+])
+def test_home_directory_usernames(text, value):
+    assert ("USERNAME", value) in labels(text)
+
+
+def test_websocket_urls_are_hidden():
+    assert ("URL", "wss://example-app.hf.space/queue/join") in labels("connect to wss://example-app.hf.space/queue/join now")
